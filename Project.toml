@@ -11,6 +11,6 @@ vroom_jll = "62a4a0cf-2cbc-5e0f-8f30-f6cab19063e7"
 
 [compat]
 JSON3 = "1.14.3"
-LinearAlgebra = "1.12.0"
-StructTypes = "1.11.0"
-vroom_jll = "1.14.0"
+LinearAlgebra = "1.10"
+StructTypes = "1.11"
+vroom_jll = "=1.14.0"
