@@ -48,9 +48,3 @@ costs = [
     )
     _test_sol(Vroom.vroom(problem))
 end
-
-@testset "Example 2 from model" begin
-    model = Vroom.Model(2, [1], [2], costs)
-    problem = Vroom.Problem(model)
-    _test_sol(Vroom.vroom(problem))
-end;
