@@ -1,5 +1,5 @@
 module Vroom
 
-greet() = print("Hello World!")
+include("json.jl")
 
 end # module Vroom
