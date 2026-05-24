@@ -1,5 +1,4 @@
 import LinearAlgebra
-import StructTypes
 
 # Model corresponding to what VROOM needs as JSON input when it is serialized
 @kwdef struct Vehicle
@@ -66,8 +65,6 @@ struct Summary
     violations::Vector{Int}
 end
 
-StructTypes.StructType(::Type{Summary}) = StructTypes.Struct()
-
 struct Step
     type::String
     location_index::Int
@@ -78,8 +75,6 @@ struct Step
     duration::Int
     violations::Vector{Int}
 end
-
-StructTypes.StructType(::Type{Step}) = StructTypes.Struct()
 
 struct Route
     vehicle::Int
@@ -93,8 +88,6 @@ struct Route
     violations::Vector{Int}
 end
 
-StructTypes.StructType(::Type{Route}) = StructTypes.Struct()
-
 struct Solution
     code::Int
     summary::Summary
@@ -102,20 +95,18 @@ struct Solution
     routes::Vector{Route}
 end
 
-StructTypes.StructType(::Type{Solution}) = StructTypes.Struct()
-
-import JSON3
+import JSON
 
 function vroom(model::Problem)
     solution = nothing
     mktemp() do input, input_io
-        JSON3.write(input_io, model)
+        JSON.json(input_io, model)
         flush(input_io)
         mktemp() do output, _
             vroom_jll.vroom() do exe
                 run(`$exe -i $input -o $output`)
             end
-            return solution = JSON3.read(read(output, String), Solution)
+            return solution = JSON.parse(read(output, String), Solution)
         end
     end
     return solution
