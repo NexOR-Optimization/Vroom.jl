@@ -1,0 +1,4 @@
+name = "Vroom"
+uuid = "7b1a88cc-e3cf-4743-80d1-c4827652cc7c"
+version = "0.1.0"
+authors = ["Benoît Legat <benoit.legat@gmail.com>"]
