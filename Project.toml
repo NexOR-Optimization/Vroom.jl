@@ -4,13 +4,11 @@ version = "0.1.0"
 authors = ["Benoît Legat <benoit.legat@gmail.com>"]
 
 [deps]
-JSON3 = "0f8b85d8-7281-11e9-16c2-39a750bddbf1"
+JSON = "682c06a0-de6a-54ab-a142-c8b1cf79cde6"
 LinearAlgebra = "37e2e46d-f89d-539d-b4ee-838fcccc9c8e"
-StructTypes = "856f2bd8-1eba-4b0a-8007-ebc267875bd4"
 vroom_jll = "62a4a0cf-2cbc-5e0f-8f30-f6cab19063e7"
 
 [compat]
-JSON3 = "1.14.3"
+JSON = "1.4"
 LinearAlgebra = "1.10"
-StructTypes = "1.11"
 vroom_jll = "=1.14.0"
