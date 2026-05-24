@@ -107,17 +107,14 @@ StructTypes.StructType(::Type{Solution}) = StructTypes.Struct()
 import JSON3
 
 function vroom(model::Problem)
-    display(model.vehicles)
-    display(model.jobs)
-    display(model.matrices)
-    root_dir = joinpath(dirname(dirname(dirname(dirname(@__DIR__)))))
-    vroom = joinpath(root_dir, "vroom", "bin", "vroom")
     solution = nothing
     mktemp() do input, input_io
         JSON3.write(input_io, model)
         flush(input_io)
         mktemp() do output, _
-            run(`$vroom -i $input -o $output`)
+            vroom_jll.vroom() do exe
+                run(`$exe -i $input -o $output`)
+            end
             return solution = JSON3.read(read(output, String), Solution)
         end
     end
