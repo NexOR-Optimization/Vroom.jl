@@ -1,6 +1,10 @@
 [deps]
+JuMP = "4076af6c-e467-56ae-b986-b466b2749572"
+MathOptInterface = "b8f27783-ece8-5eb3-8dc8-9495eed66fee"
+MathOptVRP = "ee161a15-0030-435c-8c62-bd8c501c3551"
 Test = "8dfed614-e22c-5e08-85e1-65c5234f0b40"
 Vroom = "7b1a88cc-e3cf-4743-80d1-c4827652cc7c"
 
 [sources]
+MathOptVRP = {path = "../../MathOptVRP"}
 Vroom = {path = ".."}
