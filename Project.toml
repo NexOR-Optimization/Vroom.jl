@@ -10,9 +10,6 @@ MathOptInterface = "b8f27783-ece8-5eb3-8dc8-9495eed66fee"
 MathOptVRP = "ee161a15-0030-435c-8c62-bd8c501c3551"
 vroom_jll = "62a4a0cf-2cbc-5e0f-8f30-f6cab19063e7"
 
-[sources]
-MathOptVRP = {url = "https://github.com/NexOR-Optimization/MathOptVRP.jl/"}
-
 [compat]
 JSON = "1.4"
 LinearAlgebra = "1.10"
