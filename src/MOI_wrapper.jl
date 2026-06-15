@@ -125,10 +125,7 @@ end
 
 # Variables
 
-function MOI.supports_add_constrained_variables(
-    ::Optimizer,
-    ::Type{MathOptVRP.Partition},
-)
+function MOI.supports_add_constrained_variables(::Optimizer, ::Type{MathOptVRP.Partition})
     return true
 end
 
@@ -151,9 +148,7 @@ function MOI.add_constrained_variables(m::Optimizer, set::MathOptVRP.Partition)
     end
     m.partition = set
     m.next_constraint += 1
-    ci = MOI.ConstraintIndex{MOI.VectorOfVariables,MathOptVRP.Partition}(
-        m.next_constraint,
-    )
+    ci = MOI.ConstraintIndex{MOI.VectorOfVariables,MathOptVRP.Partition}(m.next_constraint)
     return vars, ci
 end
 
@@ -207,21 +202,23 @@ function _parse_leaf(m::Optimizer, leaf::MOI.ScalarNonlinearFunction)
         error("Vroom: depot_end must be a `Real`; got $(typeof(items[end]))")
     depot_start = round(Int, items[1])
     depot_end = round(Int, items[end])
-    depot_start == depot_end ||
-        error("Vroom: depot_start != depot_end is not supported")
+    depot_start == depot_end || error("Vroom: depot_start != depot_end is not supported")
     # All interior items must be partition variables of one column.
     column = nothing
-    for k = 2:(length(items) - 1)
+    for k = 2:(length(items)-1)
         it = items[k]
-        it isa MOI.VariableIndex ||
-            error("Vroom: interior `:sum_distances` items must be variables; got $(typeof(it))")
+        it isa MOI.VariableIndex || error(
+            "Vroom: interior `:sum_distances` items must be variables; got $(typeof(it))",
+        )
         pos = get(m.variable_to_position, it, nothing)
         pos === nothing &&
             error("Vroom: variable $(it) is not part of a registered Partition")
         if column === nothing
             column = pos[2]
         elseif column != pos[2]
-            error("Vroom: `:sum_distances` mixes variables from columns $(column) and $(pos[2])")
+            error(
+                "Vroom: `:sum_distances` mixes variables from columns $(column) and $(pos[2])",
+            )
         end
     end
     column === nothing && error("Vroom: `:sum_distances` has no interior variables")
@@ -245,8 +242,8 @@ function _normalize_items(raw)
             push!(per_row[vt.output_index], vt.scalar_term)
         end
         return Any[
-            _simplify_item(MOI.ScalarAffineFunction(per_row[i], raw.constants[i]))
-            for i = 1:n
+            _simplify_item(MOI.ScalarAffineFunction(per_row[i], raw.constants[i])) for
+            i = 1:n
         ]
     elseif raw isa AbstractVector
         return Any[_simplify_item(el) for el in raw]
@@ -268,8 +265,7 @@ end
 # ── Optimize ─────────────────────────────────────────────────────────
 
 function MOI.optimize!(m::Optimizer)
-    m.partition !== nothing ||
-        error("Vroom: model has no `MathOptVRP.Partition` variables")
+    m.partition !== nothing || error("Vroom: model has no `MathOptVRP.Partition` variables")
     m.objective_function !== nothing && m.objective_sense == MOI.MIN_SENSE ||
         error("Vroom: requires a `MIN_SENSE` `:sum_distances` objective")
 
@@ -286,7 +282,8 @@ function MOI.optimize!(m::Optimizer)
     matrix_ref = parsed[1][1]
     depot = parsed[1][2]
     for (mat, dep, _) in parsed
-        mat == matrix_ref || error("Vroom: per-truck `:sum_distances` matrices must be equal")
+        mat == matrix_ref ||
+            error("Vroom: per-truck `:sum_distances` matrices must be equal")
         dep == depot || error("Vroom: per-truck depots must agree; got $(dep) vs $(depot)")
     end
     leaf_columns = Int[col for (_, _, col) in parsed]
@@ -298,15 +295,14 @@ function MOI.optimize!(m::Optimizer)
     n_locations == size(durations, 2) ||
         error("Vroom: distance matrix must be square; got $(size(durations))")
     n_clients = m.partition.num_clients
-    customer_locs = [loc for loc = 0:(n_locations - 1) if loc != depot]
+    customer_locs = [loc for loc = 0:(n_locations-1) if loc != depot]
     length(customer_locs) == n_clients || error(
         "Vroom: matrix has $(length(customer_locs)) non-depot rows but Partition has ",
         "$(n_clients) customers",
     )
 
-    vehicles = [
-        Vehicle(id = i - 1, start_index = depot, end_index = depot) for i = 1:n_trucks
-    ]
+    vehicles =
+        [Vehicle(id = i - 1, start_index = depot, end_index = depot) for i = 1:n_trucks]
     jobs = [Job(id = loc, location_index = loc) for loc in customer_locs]
     problem = Problem(
         vehicles = vehicles,
@@ -330,7 +326,7 @@ function MOI.optimize!(m::Optimizer)
     # `leaf_columns[k]` of the partition.
     routes = [Int[] for _ = 1:n_trucks]
     for r in sol.routes
-        truck_col = leaf_columns[r.vehicle + 1]
+        truck_col = leaf_columns[r.vehicle+1]
         for step in r.steps
             step.type == "job" || continue
             push!(routes[truck_col], step.location_index)
