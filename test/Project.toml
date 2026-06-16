@@ -6,5 +6,4 @@ Test = "8dfed614-e22c-5e08-85e1-65c5234f0b40"
 Vroom = "7b1a88cc-e3cf-4743-80d1-c4827652cc7c"
 
 [sources]
-MathOptVRP = {path = "../../MathOptVRP"}
 Vroom = {path = ".."}
