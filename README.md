@@ -1,4 +1,4 @@
-# MaxiCP.jl
+# Vroom.jl
 
 [![Build Status](https://github.com/NexOR-Optimization/Vroom.jl/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/NexOR-Optimization/Vroom.jl/actions?query=workflow%3ACI)
 
