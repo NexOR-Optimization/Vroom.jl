@@ -1,9 +1,11 @@
 # Minimal MOI wrapper. Scope is intentionally narrow: just enough to run
-# `MathOptVRP.Tests.test_vrp`. We accept one `MathOptVRP.Partition` set of
-# variables, a `MOI.ScalarNonlinearFunction` objective built from
+# `MathOptVRP.Tests.test_vrp`, `test_tsp` and `test_vrppd`. We accept one
+# `MathOptVRP.Partition` or `MathOptVRP.PartitionPD` set of variables, a
+# `MOI.ScalarNonlinearFunction` objective built from
 # `MathOptVRP.op_sum_distances` (one leaf per truck, optionally wrapped in
 # `:+` nodes), and lower it to a Vroom JSON `Problem` with one `Vehicle`
-# per truck and one `Job` per customer.
+# per truck, one `Job` per plain customer/service, and one `Shipment` per
+# pickup/delivery pair.
 
 import MathOptInterface as MOI
 import MathOptVRP
@@ -14,7 +16,7 @@ mutable struct Optimizer <: MOI.AbstractOptimizer
     # (row, col) of each partition variable, column-major in the order
     # `add_constrained_variables` received them.
     variable_to_position::Dict{MOI.VariableIndex,Tuple{Int,Int}}
-    partition::Union{Nothing,MathOptVRP.Partition}
+    partition::Union{Nothing,MathOptVRP.Partition,MathOptVRP.PartitionPD}
     objective_sense::MOI.OptimizationSense
     objective_function::Union{Nothing,MOI.ScalarNonlinearFunction}
     silent::Bool
@@ -124,15 +126,32 @@ function MOI.get(m::Optimizer, ::MOI.ListOfModelAttributesSet)
 end
 
 # Variables
+#
+# Both `MathOptVRP.Partition` and `MathOptVRP.PartitionPD` are handled the
+# same way: a `num_rows × num_trucks` matrix of variables, flattened
+# column-major by `JuMP.build_variable`. `_partition_dims` extracts
+# `(num_rows, num_trucks)` for either set type; `num_rows` is the plain
+# customer count for `Partition`, or `num_services + 2 * num_pickup_deliveries`
+# for `PartitionPD` (services, then pickups, then deliveries).
+
+_partition_dims(set::MathOptVRP.Partition) = (set.num_clients, set.num_trucks)
+_partition_dims(set::MathOptVRP.PartitionPD) = (set.num_services + 2 * set.num_pickup_deliveries, set.num_trucks)
 
 function MOI.supports_add_constrained_variables(::Optimizer, ::Type{MathOptVRP.Partition})
     return true
 end
 
-function MOI.add_constrained_variables(m::Optimizer, set::MathOptVRP.Partition)
+function MOI.supports_add_constrained_variables(::Optimizer, ::Type{MathOptVRP.PartitionPD})
+    return true
+end
+
+function MOI.add_constrained_variables(
+    m::Optimizer,
+    set::Union{MathOptVRP.Partition,MathOptVRP.PartitionPD},
+)
     m.partition === nothing ||
-        error("Vroom: only one MathOptVRP.Partition set is supported per model")
-    n_rows, n_cols = set.num_clients, set.num_trucks
+        error("Vroom: only one MathOptVRP.Partition/PartitionPD set is supported per model")
+    n_rows, n_cols = _partition_dims(set)
     n = n_rows * n_cols
     vars = Vector{MOI.VariableIndex}(undef, n)
     # `JuMP.build_variable(::Partition)` flattens column-major via `vec`, so
@@ -148,7 +167,7 @@ function MOI.add_constrained_variables(m::Optimizer, set::MathOptVRP.Partition)
     end
     m.partition = set
     m.next_constraint += 1
-    ci = MOI.ConstraintIndex{MOI.VectorOfVariables,MathOptVRP.Partition}(m.next_constraint)
+    ci = MOI.ConstraintIndex{MOI.VectorOfVariables,typeof(set)}(m.next_constraint)
     return vars, ci
 end
 
@@ -262,6 +281,33 @@ function _simplify_item(f::MOI.ScalarAffineFunction)
     return f
 end
 
+# A plain `Partition` customer is a Vroom `Job`. A `PartitionPD` node is
+# either a `Job` (service, location < num_services) or one half of a
+# `Shipment` pickup/delivery pair. `id` is set to the location index, matching
+# the plain-`Partition` convention, and stays unique across jobs and
+# shipments since services/pickups/deliveries occupy disjoint locations.
+
+function _jobs_and_shipments(::MathOptVRP.Partition, customer_locs::Vector{Int})
+    jobs = [Job(id = loc, location_index = loc) for loc in customer_locs]
+    return jobs, Shipment[]
+end
+
+function _jobs_and_shipments(set::MathOptVRP.PartitionPD, customer_locs::Vector{Int})
+    ns = set.num_services
+    npd = set.num_pickup_deliveries
+    jobs = [Job(id = loc, location_index = loc) for loc in customer_locs if loc < ns]
+    shipments = [
+        Shipment(
+            pickup = ShipmentStep(id = ns + k - 1, location_index = ns + k - 1),
+            delivery = ShipmentStep(
+                id = ns + npd + k - 1,
+                location_index = ns + npd + k - 1,
+            ),
+        ) for k = 1:npd
+    ]
+    return jobs, shipments
+end
+
 # ── Optimize ─────────────────────────────────────────────────────────
 
 function MOI.optimize!(m::Optimizer)
@@ -294,7 +340,7 @@ function MOI.optimize!(m::Optimizer)
     n_locations = size(durations, 1)
     n_locations == size(durations, 2) ||
         error("Vroom: distance matrix must be square; got $(size(durations))")
-    n_clients = m.partition.num_clients
+    n_clients, _ = _partition_dims(m.partition)
     customer_locs = [loc for loc = 0:(n_locations-1) if loc != depot]
     length(customer_locs) == n_clients || error(
         "Vroom: matrix has $(length(customer_locs)) non-depot rows but Partition has ",
@@ -303,11 +349,11 @@ function MOI.optimize!(m::Optimizer)
 
     vehicles =
         [Vehicle(id = i - 1, start_index = depot, end_index = depot) for i = 1:n_trucks]
-    jobs = [Job(id = loc, location_index = loc) for loc in customer_locs]
+    jobs, shipments = _jobs_and_shipments(m.partition, customer_locs)
     problem = Problem(
         vehicles = vehicles,
         jobs = jobs,
-        shipments = Shipment[],
+        shipments = shipments,
         matrices = DurationMatrices(car = DurationMatrix(durations)),
     )
 
@@ -328,7 +374,7 @@ function MOI.optimize!(m::Optimizer)
     for r in sol.routes
         truck_col = leaf_columns[r.vehicle+1]
         for step in r.steps
-            step.type == "job" || continue
+            step.type in ("job", "pickup", "delivery") || continue
             push!(routes[truck_col], step.location_index)
         end
     end

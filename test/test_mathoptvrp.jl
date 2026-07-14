@@ -14,3 +14,7 @@ end
     # directly rather than running `MathOptVRP.Tests.runtests`.
     MathOptVRP.Tests.test_vrp(Vroom.Optimizer; read_routes = _vroom_read_routes)
 end
+
+@testset "MathOptVRP.test_vrppd" begin
+    MathOptVRP.Tests.test_vrppd(Vroom.Optimizer; read_routes = _vroom_read_routes)
+end
