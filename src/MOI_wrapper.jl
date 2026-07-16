@@ -135,7 +135,8 @@ end
 # for `PartitionPD` (services, then pickups, then deliveries).
 
 _partition_dims(set::MathOptVRP.Partition) = (set.num_clients, set.num_trucks)
-_partition_dims(set::MathOptVRP.PartitionPD) = (set.num_services + 2 * set.num_pickup_deliveries, set.num_trucks)
+_partition_dims(set::MathOptVRP.PartitionPD) =
+    (set.num_services + 2 * set.num_pickup_deliveries, set.num_trucks)
 
 function MOI.supports_add_constrained_variables(::Optimizer, ::Type{MathOptVRP.Partition})
     return true
