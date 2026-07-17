@@ -22,7 +22,7 @@ end
 end
 
 @kwdef struct Shipment
-    amount::Int
+    amount::Vector{Int} = Int[]
     pickup::ShipmentStep
     delivery::ShipmentStep
 end
