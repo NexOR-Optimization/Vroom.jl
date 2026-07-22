@@ -8,6 +8,8 @@ using MathOptVRP
     MathOptVRP.Tests.test_tsp,
     MathOptVRP.Tests.test_vrp,
     MathOptVRP.Tests.test_vrppd,
+    MathOptVRP.Tests.test_vrptw,
 ]
     test(Vroom.Optimizer)
 end
+

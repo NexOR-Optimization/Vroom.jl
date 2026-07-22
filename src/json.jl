@@ -1,4 +1,5 @@
 import LinearAlgebra
+import JSON
 
 # Model corresponding to what VROOM needs as JSON input when it is serialized
 @kwdef struct Vehicle
@@ -12,6 +13,21 @@ end
     location_index::Int
     setup::Int = 0
     service::Int = 0
+    time_windows::Vector{Vector{Int}} = Vector{Int}[]
+end
+
+# VROOM rejects an explicit empty `time_windows` array (it errors with
+# "Invalid time_windows array for object"), so omit the key entirely when
+# there are no windows rather than serializing `[]`.
+function JSON.lower(job::Job)
+    nt = (
+        id = job.id,
+        location_index = job.location_index,
+        setup = job.setup,
+        service = job.service,
+    )
+    isempty(job.time_windows) && return nt
+    return merge(nt, (time_windows = job.time_windows,))
 end
 
 @kwdef struct ShipmentStep
@@ -94,8 +110,6 @@ struct Solution
     unassigned::Vector{Int}
     routes::Vector{Route}
 end
-
-import JSON
 
 function vroom(model::Problem)
     solution = nothing

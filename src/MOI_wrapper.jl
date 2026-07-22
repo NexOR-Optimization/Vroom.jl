@@ -1,14 +1,28 @@
 # Minimal MOI wrapper. Scope is intentionally narrow: just enough to run
-# `MathOptVRP.Tests.test_vrp`, `test_tsp` and `test_vrppd`. We accept one
-# `MathOptVRP.PartitionPD` set of variables, a
-# `MOI.ScalarNonlinearFunction` objective built from
-# `MathOptVRP.op_sum_distances` (one leaf per truck, optionally wrapped in
-# `:+` nodes), and lower it to a Vroom JSON `Problem` with one `Vehicle`
-# per truck, one `Job` per plain customer/service, and one `Shipment` per
-# pickup/delivery pair.
+# `MathOptVRP.Tests.test_vrp`, `test_tsp`, `test_vrppd` and `test_vrptw`.
+# We accept one `MathOptVRP.Partition` or `MathOptVRP.PartitionPD` set of
+# variables, either:
+#   - a `MOI.ScalarNonlinearFunction` objective built from
+#     `MathOptVRP.op_sum_distances` (one leaf per truck, optionally wrapped
+#     in `:+` nodes), lowered to a Vroom JSON `Problem` with one `Vehicle`
+#     per truck, one `Job` per plain customer/service, and one `Shipment`
+#     per pickup/delivery pair; or
+#   - a linear `sum(t)` objective over free `t[i] >= 0` variables plus one
+#     `MathOptVRP.TimeWindows` constraint per truck, lowered to a `Problem`
+#     with per-`Job` `time_windows`/`service`, reading each truck's total
+#     time back off Vroom's `"end"` step `arrival`.
 
 import MathOptInterface as MOI
 import MathOptVRP
+
+# Per-truck data parsed out of one `MathOptVRP.TimeWindows` constraint;
+# see `MOI.add_constraint(::Optimizer, ::MOI.VectorAffineFunction, ::MathOptVRP.TimeWindows)`.
+struct _TimeWindowsEntry
+    t_var::MOI.VariableIndex
+    depot_start::Int
+    depot_end::Int
+    set::MathOptVRP.TimeWindows
+end
 
 mutable struct Optimizer <: MOI.AbstractOptimizer
     next_variable::Int
@@ -18,7 +32,17 @@ mutable struct Optimizer <: MOI.AbstractOptimizer
     variable_to_position::Dict{MOI.VariableIndex,Tuple{Int,Int}}
     partition::Union{Nothing,MathOptVRP.PartitionPD}
     objective_sense::MOI.OptimizationSense
-    objective_function::Union{Nothing,MOI.ScalarNonlinearFunction}
+    # `ScalarNonlinearFunction` is a `:sum_distances` objective (vrp)
+    # `ScalarAffineFunction{Float64}` is a `sum(t)` objective
+    # paired with `time_windows_by_column` (vrptw).
+    objective_function::Union{
+        Nothing,
+        MOI.ScalarNonlinearFunction,
+        MOI.ScalarAffineFunction{Float64},
+    }
+    # One `MathOptVRP.TimeWindows` constraint per truck column, keyed by
+    # column; populated by `add_constraint`, consumed by `optimize!`.
+    time_windows_by_column::Dict{Int,_TimeWindowsEntry}
     silent::Bool
     time_limit::Union{Nothing,Float64}
     # Solution state, populated by `optimize!`.
@@ -37,6 +61,7 @@ mutable struct Optimizer <: MOI.AbstractOptimizer
             nothing,
             MOI.FEASIBILITY_SENSE,
             nothing,
+            Dict{Int,_TimeWindowsEntry}(),
             false,
             nothing,
             false,
@@ -55,6 +80,7 @@ function MOI.is_empty(m::Optimizer)
     return m.partition === nothing &&
            m.objective_function === nothing &&
            m.objective_sense == MOI.FEASIBILITY_SENSE &&
+           isempty(m.time_windows_by_column) &&
            !m.solved
 end
 
@@ -65,6 +91,7 @@ function MOI.empty!(m::Optimizer)
     m.partition = nothing
     m.objective_sense = MOI.FEASIBILITY_SENSE
     m.objective_function = nothing
+    empty!(m.time_windows_by_column)
     m.solved = false
     empty!(m.routes)
     m.objective_value = 0
@@ -104,7 +131,16 @@ function MOI.supports(::Optimizer, ::MOI.ObjectiveFunction{MOI.ScalarNonlinearFu
     return true
 end
 
+function MOI.supports(
+    ::Optimizer,
+    ::MOI.ObjectiveFunction{MOI.ScalarAffineFunction{Float64}},
+)
+    return true
+end
+
 function MOI.get(m::Optimizer, ::MOI.ObjectiveFunctionType)
+    m.objective_function isa MOI.ScalarAffineFunction{Float64} &&
+        return MOI.ScalarAffineFunction{Float64}
     return MOI.ScalarNonlinearFunction
 end
 
@@ -117,10 +153,19 @@ function MOI.set(
     return
 end
 
+function MOI.set(
+    m::Optimizer,
+    ::MOI.ObjectiveFunction{MOI.ScalarAffineFunction{Float64}},
+    f::MOI.ScalarAffineFunction{Float64},
+)
+    m.objective_function = f
+    return
+end
+
 function MOI.get(m::Optimizer, ::MOI.ListOfModelAttributesSet)
     attrs = Any[MOI.ObjectiveSense()]
     if m.objective_function !== nothing
-        push!(attrs, MOI.ObjectiveFunction{MOI.ScalarNonlinearFunction}())
+        push!(attrs, MOI.ObjectiveFunction{typeof(m.objective_function)}())
     end
     return attrs
 end
@@ -158,6 +203,47 @@ function MOI.add_constrained_variables(m::Optimizer, set::MathOptVRP.PartitionPD
     m.next_constraint += 1
     ci = MOI.ConstraintIndex{MOI.VectorOfVariables,typeof(set)}(m.next_constraint)
     return vars, ci
+end
+
+# `vrptw` declares free `t[i] >= 0` variables (one per truck,
+# not part of the `Partition`) purely so `sum(t)` can serve as the
+# objective; the bound itself carries no meaning to Vroom and is accepted
+# as a no-op. `variable_to_position` intentionally has no entry for these,
+# which is how the `TimeWindows` `MOI.add_constraint` method below tells a
+# `t` variable apart from a `Partition` node variable.
+
+function MOI.add_variable(m::Optimizer)
+    m.next_variable += 1
+    return MOI.VariableIndex(m.next_variable)
+end
+
+function MOI.supports_add_constrained_variable(
+    ::Optimizer,
+    ::Type{MOI.GreaterThan{Float64}},
+)
+    return true
+end
+
+function MOI.add_constrained_variable(m::Optimizer, ::MOI.GreaterThan{Float64})
+    v = MOI.add_variable(m)
+    m.next_constraint += 1
+    ci = MOI.ConstraintIndex{MOI.VariableIndex,MOI.GreaterThan{Float64}}(m.next_constraint)
+    return v, ci
+end
+
+function MOI.supports_constraint(
+    ::Optimizer,
+    ::Type{MOI.VariableIndex},
+    ::Type{MOI.GreaterThan{Float64}},
+)
+    return true
+end
+
+function MOI.add_constraint(m::Optimizer, ::MOI.VariableIndex, ::MOI.GreaterThan{Float64})
+    m.next_constraint += 1
+    return MOI.ConstraintIndex{MOI.VariableIndex,MOI.GreaterThan{Float64}}(
+        m.next_constraint,
+    )
 end
 
 # Incremental interface (JuMP copies via `default_copy_to`).
@@ -291,14 +377,93 @@ function _jobs_and_shipments(set::MathOptVRP.PartitionPD, customer_locs::Vector{
     return jobs, shipments
 end
 
+# ── TimeWindows constraint parsing ────────────────────────────────────
+# `MathOptVRP.TimeWindows{WITHOUT_START_TIME}(travel, earliest, latest,
+# service, num_items)` is applied, one per truck, to
+# `[route_end; first_node; route...; last_node]` where `route_end` is a
+# free variable (see `MOI.add_constrained_variable` above), `route` is one
+# column of `Partition` variables (`num_items` of them), and `first_node`
+# / `last_node` are one-based indices into `travel`/`earliest`/`latest`/
+# `service` for two (possibly distinct) logical copies of the depot.
+# `earliest`/`latest` are indexed by customer location, matching how
+# `_jobs_and_shipments` sets `Job.id`.
+
+function MOI.supports_constraint(
+    ::Optimizer,
+    ::Type{<:Union{MOI.VectorOfVariables,MOI.VectorAffineFunction{Float64}}},
+    ::Type{<:MathOptVRP.TimeWindows{MathOptVRP.WITHOUT_START_TIME}},
+)
+    return true
+end
+
+function MOI.add_constraint(
+    m::Optimizer,
+    f::Union{MOI.VectorOfVariables,MOI.VectorAffineFunction{Float64}},
+    s::MathOptVRP.TimeWindows{MathOptVRP.WITHOUT_START_TIME},
+)
+    items = _normalize_items(f)
+    length(items) == MOI.dimension(s) || error(
+        "Vroom: TimeWindows constraint expects $(MOI.dimension(s)) entries, got ",
+        "$(length(items))",
+    )
+    items[1] isa MOI.VariableIndex || error(
+        "Vroom: TimeWindows entry 1 (`route_end`) must be a variable; got ",
+        "$(typeof(items[1]))",
+    )
+    items[2] isa Real ||
+        error("Vroom: TimeWindows entry 2 (first_node) must be a `Real`")
+    items[end] isa Real ||
+        error("Vroom: TimeWindows last entry (last_node) must be a `Real`")
+    # One-based indices into `s.travel`/`s.earliest`/`s.latest`/`s.service`;
+    # zero-based below to match Vroom's location indexing.
+    depot_start = round(Int, items[2]) - 1
+    depot_end = round(Int, items[end]) - 1
+    column = nothing
+    for k = 3:(length(items)-1)
+        it = items[k]
+        it isa MOI.VariableIndex ||
+            error("Vroom: TimeWindows node entries must be variables; got $(typeof(it))")
+        pos = get(m.variable_to_position, it, nothing)
+        pos === nothing &&
+            error("Vroom: variable $(it) is not part of a registered Partition")
+        if column === nothing
+            column = pos[2]
+        elseif column != pos[2]
+            error("Vroom: TimeWindows mixes variables from columns $(column) and $(pos[2])")
+        end
+    end
+    column === nothing &&
+        error("Vroom: TimeWindows constraint has no interior node variables")
+    haskey(m.time_windows_by_column, column) &&
+        error("Vroom: only one TimeWindows constraint per truck column is supported")
+
+    t_var = items[1]::MOI.VariableIndex
+    m.time_windows_by_column[column] =
+        _TimeWindowsEntry(t_var, depot_start, depot_end, s)
+    m.next_constraint += 1
+    return MOI.ConstraintIndex{typeof(f),typeof(s)}(m.next_constraint)
+end
+
+# `sum(t)` lowers to a `MOI.ScalarAffineFunction` with a unit-coefficient
+# term per truck's `t` variable and a zero constant.
+function _time_vars(f::MOI.ScalarAffineFunction{Float64})
+    iszero(f.constant) || error("Vroom: VRPTW objective must have a zero constant")
+    vars = MOI.VariableIndex[]
+    for term in f.terms
+        isone(term.coefficient) || error(
+            "Vroom: VRPTW objective must be a plain `sum(t)` over unit-coefficient terms",
+        )
+        push!(vars, term.variable)
+    end
+    return vars
+end
+
 # ── Optimize ─────────────────────────────────────────────────────────
 
-function MOI.optimize!(m::Optimizer)
-    m.partition !== nothing ||
-        error("Vroom: model has no `MathOptVRP.PartitionPD` variables")
-    m.objective_function !== nothing && m.objective_sense == MOI.MIN_SENSE ||
-        error("Vroom: requires a `MIN_SENSE` `:sum_distances` objective")
-
+# Parses the `MOI.ScalarNonlinearFunction` `:sum_distances` objective.
+# Vehicle `k - 1` was created for the `k`th objective leaf,
+# which corresponds to column `vehicle_to_column[k]`.
+function _lower_sum_distances(m::Optimizer)
     leaves = MOI.ScalarNonlinearFunction[]
     _collect_sum_distances_leaves!(leaves, m.objective_function)
     isempty(leaves) && error("Vroom: empty `:sum_distances` objective")
@@ -335,6 +500,100 @@ function MOI.optimize!(m::Optimizer)
     vehicles =
         [Vehicle(id = i - 1, start_index = depot, end_index = depot) for i = 1:n_trucks]
     jobs, shipments = _jobs_and_shipments(m.partition, customer_locs)
+    return vehicles, jobs, shipments, durations, leaf_columns
+end
+
+# Parses the `MathOptVRP.TimeWindows` constraints + `sum(t)` objective
+# into the same ingredient shape as `_lower_sum_distances`.
+# Vehicles are built directly in column order, so `vehicle_to_column` is
+# the identity — unlike the `:sum_distances` path, there's no leaf order
+# to permute against.
+function _lower_time_windows(m::Optimizer)
+    m.objective_function isa MOI.ScalarAffineFunction{Float64} &&
+    m.objective_sense == MOI.MIN_SENSE || error(
+        "Vroom: TimeWindows constraints require a `MIN_SENSE` linear `sum(t)` objective",
+    )
+    n_trucks = m.partition.num_trucks
+    sort(collect(keys(m.time_windows_by_column))) == collect(1:n_trucks) || error(
+        "Vroom: expected one TimeWindows constraint for each of the $(n_trucks) truck ",
+        "columns",
+    )
+    entries = [m.time_windows_by_column[col] for col = 1:n_trucks]
+
+    obj_vars = _time_vars(m.objective_function)
+    Set(obj_vars) == Set(e.t_var for e in entries) && length(obj_vars) == n_trucks || error(
+        "Vroom: objective must be `sum(t)` over exactly the TimeWindows constraints' ",
+        "time variables",
+    )
+
+    ref = entries[1].set
+    depot_start = entries[1].depot_start
+    depot_end = entries[1].depot_end
+    for e in entries
+        e.set.travel == ref.travel ||
+            error("Vroom: per-truck TimeWindows travel matrices must be equal")
+        e.set.earliest == ref.earliest ||
+            error("Vroom: per-truck TimeWindows `earliest` must agree")
+        e.set.latest == ref.latest ||
+            error("Vroom: per-truck TimeWindows `latest` must agree")
+        e.set.service == ref.service ||
+            error("Vroom: per-truck TimeWindows `service` must agree")
+        e.depot_start == depot_start ||
+            error("Vroom: per-truck TimeWindows first_node (depot_start) must agree")
+        e.depot_end == depot_end ||
+            error("Vroom: per-truck TimeWindows last_node (depot_end) must agree")
+    end
+
+    durations = Matrix{Int}(round.(Int, ref.travel))
+    n_locations = size(durations, 1)
+    n_locations == size(durations, 2) ||
+        error("Vroom: distance matrix must be square; got $(size(durations))")
+    n_clients, _ = _partition_dims(m.partition)
+    customer_locs =
+        [loc for loc = 0:(n_locations-1) if loc != depot_start && loc != depot_end]
+    length(customer_locs) == n_clients || error(
+        "Vroom: matrix has $(length(customer_locs)) non-depot rows but Partition has ",
+        "$(n_clients) customers",
+    )
+    length(ref.earliest) == n_locations || error(
+        "Vroom: TimeWindows `earliest` length must match the travel matrix size",
+    )
+
+    vehicles = [
+        Vehicle(id = i - 1, start_index = depot_start, end_index = depot_end) for
+        i = 1:n_trucks
+    ]
+    jobs = [
+        Job(
+            id = loc,
+            location_index = loc,
+            service = round(Int, ref.service[loc+1]),
+            time_windows = [[
+                round(Int, ref.earliest[loc+1]),
+                round(Int, ref.latest[loc+1]),
+            ]],
+        ) for loc in customer_locs
+    ]
+    return vehicles, jobs, Shipment[], durations, collect(1:n_trucks)
+end
+
+
+# Shared solve mechanics: build the `Problem`, call `vroom`, and rebuild
+# `m.routes` per *user-defined* truck column (via `vehicle_to_column`)
+# plus each truck's total elapsed time (`truck_time`, off the `"end"`
+# step's `arrival`). `compute_objective(sol, truck_time)` picks how a
+# given path turns that into `m.objective_value` — `sol.summary.cost`
+# (distance) for `:sum_distances`, `sum(truck_time)` for `TimeWindows`.
+function _solve!(
+    m::Optimizer,
+    vehicles::Vector{Vehicle},
+    jobs::Vector{Job},
+    shipments::Vector{Shipment},
+    durations::Matrix{Int},
+    vehicle_to_column::Vector{Int},
+    compute_objective::Function,
+)
+    n_trucks = length(vehicle_to_column)
     problem = Problem(
         vehicles = vehicles,
         jobs = jobs,
@@ -352,20 +611,21 @@ function MOI.optimize!(m::Optimizer)
         return
     end
 
-    # Rebuild routes per *user-defined* truck column. Vehicle `k - 1` was
-    # created for the `k`th leaf, which corresponds to column
-    # `leaf_columns[k]` of the partition.
     routes = [Int[] for _ = 1:n_trucks]
+    truck_time = zeros(Int, n_trucks)
     for r in sol.routes
-        truck_col = leaf_columns[r.vehicle+1]
+        truck_col = vehicle_to_column[r.vehicle+1]
         for step in r.steps
-            step.type in ("job", "pickup", "delivery") || continue
-            push!(routes[truck_col], step.location_index + 1)
+            if step.type in ("job", "pickup", "delivery")
+                push!(routes[truck_col], step.location_index + 1)
+            elseif step.type == "end"
+                truck_time[truck_col] = step.arrival
+            end
         end
     end
 
     m.routes = routes
-    m.objective_value = sol.summary.cost
+    m.objective_value = compute_objective(sol, truck_time)
     m.solved = true
     if sol.code == 0
         m.termination_status = MOI.OPTIMAL
@@ -377,6 +637,35 @@ function MOI.optimize!(m::Optimizer)
         m.raw_status = "vroom code=$(sol.code)"
     end
     return
+end
+
+function MOI.optimize!(m::Optimizer)
+    m.partition !== nothing ||
+        error("Vroom: model has no `MathOptVRP.PartitionPD` variables")
+    if !isempty(m.time_windows_by_column)
+        vehicles, jobs, shipments, durations, vehicle_to_column = _lower_time_windows(m)
+        return _solve!(
+            m,
+            vehicles,
+            jobs,
+            shipments,
+            durations,
+            vehicle_to_column,
+            (sol, truck_time) -> sum(truck_time),
+        )
+    end
+    m.objective_function !== nothing && m.objective_sense == MOI.MIN_SENSE ||
+        error("Vroom: requires a `MIN_SENSE` `:sum_distances` objective")
+    vehicles, jobs, shipments, durations, vehicle_to_column = _lower_sum_distances(m)
+    return _solve!(
+        m,
+        vehicles,
+        jobs,
+        shipments,
+        durations,
+        vehicle_to_column,
+        (sol, _) -> sol.summary.cost,
+    )
 end
 
 # ── Solution getters ─────────────────────────────────────────────────
