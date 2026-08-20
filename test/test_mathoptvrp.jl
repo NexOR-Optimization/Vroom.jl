@@ -4,10 +4,7 @@ using Vroom
 import MathOptInterface as MOI
 using MathOptVRP
 
-@testset "$test" for test in [
-    MathOptVRP.test_trp,
-    MathOptVRP.test_vrp,
-]
+@testset "$test" for test in [MathOptVRP.Tests.test_trp, MathOptVRP.Tests.test_vrp]
     test(Vroom.Optimizer)
 end
 
