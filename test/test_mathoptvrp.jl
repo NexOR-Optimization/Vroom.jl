@@ -4,11 +4,11 @@ using Vroom
 import MathOptInterface as MOI
 using MathOptVRP
 
-@testset "MathOptVRP" begin
-    optimizer = MOI.instantiate(Vroom.Optimizer; with_bridge_type = Float64)
-    MathOptVRP.Bridges.add_all_bridges(optimizer)
-    MathOptVRP.Tests.test_tsp(optimizer)
-    MathOptVRP.Tests.test_vrp(Vroom.Optimizer)
+@testset "$test" for test in [
+    MathOptVRP.test_trp,
+    MathOptVRP.test_vrp,
+]
+    test(Vroom.Optimizer)
 end
 
 @testset "MathOptVRP.test_vrppd" begin
