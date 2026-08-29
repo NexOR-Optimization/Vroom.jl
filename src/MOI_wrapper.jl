@@ -215,7 +215,7 @@ function _parse_leaf(m::Optimizer, leaf::MOI.ScalarNonlinearFunction)
         error("Vroom: `:sum_distances` arg 1 must be a real matrix; got $(typeof(matrix))")
     items = _normalize_items(leaf.args[2])
     length(items) >= 3 ||
-        error("Vroom: `:sum_distances` vector must be `[depot; col; depot]` (≥ 3 entries)")
+        error("Vroom: `:sum_distances` vector must be `[depot; col; depot]`")
     items[1] isa Real ||
         error("Vroom: depot_start must be a `Real`; got $(typeof(items[1]))")
     items[end] isa Real ||
@@ -223,6 +223,7 @@ function _parse_leaf(m::Optimizer, leaf::MOI.ScalarNonlinearFunction)
     depot_start = round(Int, items[1])
     depot_end = round(Int, items[end])
     depot_start == depot_end || error("Vroom: depot_start != depot_end is not supported")
+    depot = depot_start - 1 # MOI node values are one-based; Vroom is zero-based.
     # All interior items must be partition variables of one column.
     column = nothing
     for k = 2:(length(items)-1)
@@ -242,7 +243,7 @@ function _parse_leaf(m::Optimizer, leaf::MOI.ScalarNonlinearFunction)
         end
     end
     column === nothing && error("Vroom: `:sum_distances` has no interior variables")
-    return matrix, depot_start, column::Int
+    return matrix, depot, column::Int
 end
 
 # JuMP can hand us the second `:sum_distances` arg as either a raw
@@ -342,6 +343,7 @@ function MOI.optimize!(m::Optimizer)
     n_locations == size(durations, 2) ||
         error("Vroom: distance matrix must be square; got $(size(durations))")
     n_clients, _ = _partition_dims(m.partition)
+    0 <= depot < n_locations || error("Vroom: depot index $(depot + 1) is out of bounds")
     customer_locs = [loc for loc = 0:(n_locations-1) if loc != depot]
     length(customer_locs) == n_clients || error(
         "Vroom: matrix has $(length(customer_locs)) non-depot rows but Partition has ",
@@ -376,7 +378,7 @@ function MOI.optimize!(m::Optimizer)
         truck_col = leaf_columns[r.vehicle+1]
         for step in r.steps
             step.type in ("job", "pickup", "delivery") || continue
-            push!(routes[truck_col], step.location_index)
+            push!(routes[truck_col], step.location_index + 1)
         end
     end
 
@@ -413,11 +415,10 @@ function MOI.get(m::Optimizer, attr::MOI.ObjectiveValue)
     return Float64(m.objective_value)
 end
 
-# Vroom assigns customers itself, so individual `VariablePrimal` queries
-# don't have a meaningful answer to return — the test reaches into
-# `inner.routes` via `read_routes` instead. Return the depot value so
-# `JuMP.value(::VariableRef)` at least doesn't throw.
-function MOI.get(m::Optimizer, attr::MOI.VariablePrimal, ::MOI.VariableIndex)
+# Map each zero-padded Partition proxy to its position in Vroom's route.
+function MOI.get(m::Optimizer, attr::MOI.VariablePrimal, vi::MOI.VariableIndex)
     MOI.check_result_index_bounds(m, attr)
-    return 0.0
+    row, column = m.variable_to_position[vi]
+    route = m.routes[column]
+    return Float64(row <= length(route) ? route[row] : 0)
 end
