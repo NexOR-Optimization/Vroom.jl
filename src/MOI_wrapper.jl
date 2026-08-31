@@ -137,10 +137,7 @@ function MOI.supports_add_constrained_variables(::Optimizer, ::Type{MathOptVRP.P
     return true
 end
 
-function MOI.add_constrained_variables(
-    m::Optimizer,
-    set::MathOptVRP.PartitionPD,
-)
+function MOI.add_constrained_variables(m::Optimizer, set::MathOptVRP.PartitionPD)
     m.partition === nothing ||
         error("Vroom: only one MathOptVRP.PartitionPD set is supported per model")
     n_rows, n_cols = _partition_dims(set)
@@ -297,7 +294,8 @@ end
 # ── Optimize ─────────────────────────────────────────────────────────
 
 function MOI.optimize!(m::Optimizer)
-    m.partition !== nothing || error("Vroom: model has no `MathOptVRP.PartitionPD` variables")
+    m.partition !== nothing ||
+        error("Vroom: model has no `MathOptVRP.PartitionPD` variables")
     m.objective_function !== nothing && m.objective_sense == MOI.MIN_SENSE ||
         error("Vroom: requires a `MIN_SENSE` `:sum_distances` objective")
 
