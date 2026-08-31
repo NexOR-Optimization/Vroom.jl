@@ -1,6 +1,6 @@
 # Minimal MOI wrapper. Scope is intentionally narrow: just enough to run
 # `MathOptVRP.Tests.test_vrp`, `test_tsp` and `test_vrppd`. We accept one
-# `MathOptVRP.Partition` or `MathOptVRP.PartitionPD` set of variables, a
+# `MathOptVRP.PartitionPD` set of variables, a
 # `MOI.ScalarNonlinearFunction` objective built from
 # `MathOptVRP.op_sum_distances` (one leaf per truck, optionally wrapped in
 # `:+` nodes), and lower it to a Vroom JSON `Problem` with one `Vehicle`
@@ -16,7 +16,7 @@ mutable struct Optimizer <: MOI.AbstractOptimizer
     # (row, col) of each partition variable, column-major in the order
     # `add_constrained_variables` received them.
     variable_to_position::Dict{MOI.VariableIndex,Tuple{Int,Int}}
-    partition::Union{Nothing,MathOptVRP.Partition,MathOptVRP.PartitionPD}
+    partition::Union{Nothing,MathOptVRP.PartitionPD}
     objective_sense::MOI.OptimizationSense
     objective_function::Union{Nothing,MOI.ScalarNonlinearFunction}
     silent::Bool
@@ -127,20 +127,11 @@ end
 
 # Variables
 #
-# Both `MathOptVRP.Partition` and `MathOptVRP.PartitionPD` are handled the
-# same way: a `num_rows × num_trucks` matrix of variables, flattened
-# column-major by `JuMP.build_variable`. `_partition_dims` extracts
-# `(num_rows, num_trucks)` for either set type; `num_rows` is the plain
-# customer count for `Partition`, or `num_services + 2 * num_pickup_deliveries`
-# for `PartitionPD` (services, then pickups, then deliveries).
-
-_partition_dims(set::MathOptVRP.Partition) = (set.num_clients, set.num_trucks)
+# `PartitionPD` is a `num_rows × num_trucks` matrix flattened column-major
+# by `JuMP.build_variable`. Plain `Partition` models reach this constructor
+# through MathOptVRP's `PartitionToPartitionPDBridge`, with zero pairs.
 _partition_dims(set::MathOptVRP.PartitionPD) =
     (set.num_services + 2 * set.num_pickup_deliveries, set.num_trucks)
-
-function MOI.supports_add_constrained_variables(::Optimizer, ::Type{MathOptVRP.Partition})
-    return true
-end
 
 function MOI.supports_add_constrained_variables(::Optimizer, ::Type{MathOptVRP.PartitionPD})
     return true
@@ -148,14 +139,14 @@ end
 
 function MOI.add_constrained_variables(
     m::Optimizer,
-    set::Union{MathOptVRP.Partition,MathOptVRP.PartitionPD},
+    set::MathOptVRP.PartitionPD,
 )
     m.partition === nothing ||
-        error("Vroom: only one MathOptVRP.Partition/PartitionPD set is supported per model")
+        error("Vroom: only one MathOptVRP.PartitionPD set is supported per model")
     n_rows, n_cols = _partition_dims(set)
     n = n_rows * n_cols
     vars = Vector{MOI.VariableIndex}(undef, n)
-    # `JuMP.build_variable(::Partition)` flattens column-major via `vec`, so
+    # `JuMP.build_variable(::PartitionPD)` flattens column-major via `vec`, so
     # entry `k` corresponds to row `((k - 1) % n_rows) + 1` of column
     # `((k - 1) ÷ n_rows) + 1`.
     for k = 1:n
@@ -283,16 +274,9 @@ function _simplify_item(f::MOI.ScalarAffineFunction)
     return f
 end
 
-# A plain `Partition` customer is a Vroom `Job`. A `PartitionPD` node is
-# either a `Job` (service, location < num_services) or one half of a
-# `Shipment` pickup/delivery pair. `id` is set to the location index, matching
-# the plain-`Partition` convention, and stays unique across jobs and
-# shipments since services/pickups/deliveries occupy disjoint locations.
-
-function _jobs_and_shipments(::MathOptVRP.Partition, customer_locs::Vector{Int})
-    jobs = [Job(id = loc, location_index = loc) for loc in customer_locs]
-    return jobs, Shipment[]
-end
+# A `PartitionPD` node is either a `Job` (service) or one half of a
+# `Shipment` pickup/delivery pair. With zero pairs, every node is a service,
+# which is exactly the plain `Partition` case produced by the bridge.
 
 function _jobs_and_shipments(set::MathOptVRP.PartitionPD, customer_locs::Vector{Int})
     ns = set.num_services
@@ -313,7 +297,7 @@ end
 # ── Optimize ─────────────────────────────────────────────────────────
 
 function MOI.optimize!(m::Optimizer)
-    m.partition !== nothing || error("Vroom: model has no `MathOptVRP.Partition` variables")
+    m.partition !== nothing || error("Vroom: model has no `MathOptVRP.PartitionPD` variables")
     m.objective_function !== nothing && m.objective_sense == MOI.MIN_SENSE ||
         error("Vroom: requires a `MIN_SENSE` `:sum_distances` objective")
 
