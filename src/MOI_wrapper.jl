@@ -410,8 +410,7 @@ function MOI.add_constraint(
         "Vroom: TimeWindows entry 1 (`route_end`) must be a variable; got ",
         "$(typeof(items[1]))",
     )
-    items[2] isa Real ||
-        error("Vroom: TimeWindows entry 2 (first_node) must be a `Real`")
+    items[2] isa Real || error("Vroom: TimeWindows entry 2 (first_node) must be a `Real`")
     items[end] isa Real ||
         error("Vroom: TimeWindows last entry (last_node) must be a `Real`")
     # One-based indices into `s.travel`/`s.earliest`/`s.latest`/`s.service`;
@@ -438,8 +437,7 @@ function MOI.add_constraint(
         error("Vroom: only one TimeWindows constraint per truck column is supported")
 
     t_var = items[1]::MOI.VariableIndex
-    m.time_windows_by_column[column] =
-        _TimeWindowsEntry(t_var, depot_start, depot_end, s)
+    m.time_windows_by_column[column] = _TimeWindowsEntry(t_var, depot_start, depot_end, s)
     m.next_constraint += 1
     return MOI.ConstraintIndex{typeof(f),typeof(s)}(m.next_constraint)
 end
@@ -555,9 +553,8 @@ function _lower_time_windows(m::Optimizer)
         "Vroom: matrix has $(length(customer_locs)) non-depot rows but Partition has ",
         "$(n_clients) customers",
     )
-    length(ref.earliest) == n_locations || error(
-        "Vroom: TimeWindows `earliest` length must match the travel matrix size",
-    )
+    length(ref.earliest) == n_locations ||
+        error("Vroom: TimeWindows `earliest` length must match the travel matrix size")
 
     vehicles = [
         Vehicle(id = i - 1, start_index = depot_start, end_index = depot_end) for

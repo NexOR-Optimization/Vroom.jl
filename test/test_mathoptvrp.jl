@@ -12,4 +12,3 @@ using MathOptVRP
 ]
     test(Vroom.Optimizer)
 end
-
