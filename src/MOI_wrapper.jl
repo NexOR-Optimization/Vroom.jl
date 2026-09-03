@@ -1,13 +1,13 @@
 # Minimal MOI wrapper. Scope is intentionally narrow: just enough to run
 # `MathOptVRP.Tests.test_vrp`, `test_tsp`, `test_vrppd` and `test_vrptw`.
-# We accept one `MathOptVRP.Partition` or `MathOptVRP.PartitionPD` set of
+# We accept one `MathOptVRP.PartitionPD` set of
 # variables, either:
 #   - a `MOI.ScalarNonlinearFunction` objective built from
 #     `MathOptVRP.op_sum_distances` (one leaf per truck, optionally wrapped
 #     in `:+` nodes), lowered to a Vroom JSON `Problem` with one `Vehicle`
 #     per truck, one `Job` per plain customer/service, and one `Shipment`
 #     per pickup/delivery pair; or
-#   - a linear `sum(t)` objective over free `t[i] >= 0` variables plus one
+#   - a linear `sum(t)` objective over free `t[i]` variables plus one
 #     `MathOptVRP.TimeWindows` constraint per truck, lowered to a `Problem`
 #     with per-`Job` `time_windows`/`service`, reading each truck's total
 #     time back off Vroom's `"end"` step `arrival`.
@@ -205,12 +205,13 @@ function MOI.add_constrained_variables(m::Optimizer, set::MathOptVRP.PartitionPD
     return vars, ci
 end
 
-# `vrptw` declares free `t[i] >= 0` variables (one per truck,
-# not part of the `Partition`) purely so `sum(t)` can serve as the
-# objective; the bound itself carries no meaning to Vroom and is accepted
-# as a no-op. `variable_to_position` intentionally has no entry for these,
-# which is how the `TimeWindows` `MOI.add_constraint` method below tells a
-# `t` variable apart from a `Partition` node variable.
+# `vrptw` declares free `t[i]` variables (one per truck, not part of the
+# `Partition`) purely so `sum(t)` can serve as the objective; nonnegativity
+# is already implied by membership in the `TimeWindows`/`CapacitatedTimeWindows`
+# set (`t[i]` is that set's `route_end` entry). `variable_to_position`
+# intentionally has no entry for these, which is how the `TimeWindows`
+# `MOI.add_constraint` method below tells a `t` variable apart from a
+# `Partition` node variable.
 
 function MOI.add_variable(m::Optimizer)
     m.next_variable += 1
