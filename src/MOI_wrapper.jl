@@ -1,6 +1,6 @@
 # Minimal MOI wrapper. Scope is intentionally narrow: just enough to run
 # `MathOptVRP.Tests.test_vrp`, `test_tsp`, `test_vrppd` and `test_vrptw`.
-# We accept one `MathOptVRP.Partition` or `MathOptVRP.PartitionPD` set of
+# We accept one `MathOptVRP.PartitionPD` set of
 # variables, either:
 #   - a `MOI.ScalarNonlinearFunction` objective built from
 #     `MathOptVRP.op_sum_distances` (one leaf per truck, optionally wrapped
@@ -43,6 +43,9 @@ mutable struct Optimizer <: MOI.AbstractOptimizer
     # One `MathOptVRP.TimeWindows` constraint per truck column, keyed by
     # column; populated by `add_constraint`, consumed by `optimize!`.
     time_windows_by_column::Dict{Int,_TimeWindowsEntry}
+    # One `MathOptVRP.Capacity` constraint per truck column, keyed by
+    # column; populated by `add_constraint`, consumed by `optimize!`.
+    capacity_by_column::Dict{Int,MathOptVRP.Capacity}
     silent::Bool
     time_limit::Union{Nothing,Float64}
     # Solution state, populated by `optimize!`.
@@ -62,6 +65,7 @@ mutable struct Optimizer <: MOI.AbstractOptimizer
             MOI.FEASIBILITY_SENSE,
             nothing,
             Dict{Int,_TimeWindowsEntry}(),
+            Dict{Int,MathOptVRP.Capacity}(),
             false,
             nothing,
             false,
@@ -81,6 +85,7 @@ function MOI.is_empty(m::Optimizer)
            m.objective_function === nothing &&
            m.objective_sense == MOI.FEASIBILITY_SENSE &&
            isempty(m.time_windows_by_column) &&
+           isempty(m.capacity_by_column) &&
            !m.solved
 end
 
@@ -92,6 +97,7 @@ function MOI.empty!(m::Optimizer)
     m.objective_sense = MOI.FEASIBILITY_SENSE
     m.objective_function = nothing
     empty!(m.time_windows_by_column)
+    empty!(m.capacity_by_column)
     m.solved = false
     empty!(m.routes)
     m.objective_value = 0
@@ -442,6 +448,54 @@ function MOI.add_constraint(
     return MOI.ConstraintIndex{typeof(f),typeof(s)}(m.next_constraint)
 end
 
+# ── Capacity constraint parsing ───────────────────────────────────────
+# `MathOptVRP.Capacity(delta, capacity)` is applied directly to one
+# truck's `PartitionPD` column (`nodes[:, i]`), so `delta` is
+# indexed by node id (one-based, matching `Job.id`/`ShipmentStep.id`) and
+# not by column row/position. We only need to know which column the
+# constraint belongs to; `delta`/`capacity` themselves are consumed
+# straight off `s` in `optimize!`.
+
+function MOI.supports_constraint(
+    ::Optimizer,
+    ::Type{<:Union{MOI.VectorOfVariables,MOI.VectorAffineFunction{Float64}}},
+    ::Type{<:MathOptVRP.Capacity},
+)
+    return true
+end
+
+function MOI.add_constraint(
+    m::Optimizer,
+    f::Union{MOI.VectorOfVariables,MOI.VectorAffineFunction{Float64}},
+    s::MathOptVRP.Capacity,
+)
+    items = _normalize_items(f)
+    length(items) == MOI.dimension(s) || error(
+        "Vroom: Capacity constraint expects $(MOI.dimension(s)) entries, got ",
+        "$(length(items))",
+    )
+    column = nothing
+    for it in items
+        it isa MOI.VariableIndex ||
+            error("Vroom: Capacity constraint entries must be variables; got $(typeof(it))")
+        pos = get(m.variable_to_position, it, nothing)
+        pos === nothing &&
+            error("Vroom: variable $(it) is not part of a registered Partition")
+        if column === nothing
+            column = pos[2]
+        elseif column != pos[2]
+            error("Vroom: Capacity constraint mixes variables from columns $(column) and $(pos[2])")
+        end
+    end
+    column === nothing && error("Vroom: Capacity constraint has no variables")
+    haskey(m.capacity_by_column, column) &&
+        error("Vroom: only one Capacity constraint per truck column is supported")
+
+    m.capacity_by_column[column] = s
+    m.next_constraint += 1
+    return MOI.ConstraintIndex{typeof(f),typeof(s)}(m.next_constraint)
+end
+
 # `sum(t)` lowers to a `MOI.ScalarAffineFunction` with a unit-coefficient
 # term per truck's `t` variable and a zero constant.
 function _time_vars(f::MOI.ScalarAffineFunction{Float64})
@@ -498,7 +552,78 @@ function _lower_sum_distances(m::Optimizer)
     vehicles =
         [Vehicle(id = i - 1, start_index = depot, end_index = depot) for i = 1:n_trucks]
     jobs, shipments = _jobs_and_shipments(m.partition, customer_locs)
+    vehicles, jobs, shipments = _apply_capacity(m, vehicles, jobs, shipments)
     return vehicles, jobs, shipments, durations, leaf_columns
+end
+
+# Applies `m.capacity_by_column` (one `MathOptVRP.Capacity` per truck
+# column, all sharing the same `delta`/`capacity`) on top of already-built
+# `vehicles`/`jobs`/`shipments`: gives every vehicle the shared capacity
+# and every job/shipment its load contribution, read off `delta` by node
+# id (`delta` is one-based; `Job.id`/`ShipmentStep.id` are Vroom's
+# zero-based location ids, so index with `id + 1`). A no-op when no
+# `Capacity` constraint was added.
+function _apply_capacity(
+    m::Optimizer,
+    vehicles::Vector{Vehicle},
+    jobs::Vector{Job},
+    shipments::Vector{Shipment},
+)
+    isempty(m.capacity_by_column) && return vehicles, jobs, shipments
+    n_trucks = length(vehicles)
+    sort(collect(keys(m.capacity_by_column))) == collect(1:n_trucks) || error(
+        "Vroom: expected one Capacity constraint for each of the $(n_trucks) truck ",
+        "columns",
+    )
+    entries = [m.capacity_by_column[col] for col = 1:n_trucks]
+    ref = entries[1]
+    for e in entries
+        e.delta == ref.delta || error("Vroom: per-truck Capacity `delta` must agree")
+        e.capacity == ref.capacity || error("Vroom: per-truck Capacity `capacity` must agree")
+    end
+
+    capacity = [round(Int, ref.capacity)]
+    vehicles = [
+        Vehicle(
+            id = v.id,
+            start_index = v.start_index,
+            end_index = v.end_index,
+            capacity = capacity,
+        ) for v in vehicles
+    ]
+    jobs = [
+        let d = round(Int, ref.delta[job.id+1])
+            if d > 0
+                Job(
+                    id = job.id,
+                    location_index = job.location_index,
+                    setup = job.setup,
+                    service = job.service,
+                    time_windows = job.time_windows,
+                    pickup = [d],
+                )
+            elseif d < 0
+                Job(
+                    id = job.id,
+                    location_index = job.location_index,
+                    setup = job.setup,
+                    service = job.service,
+                    time_windows = job.time_windows,
+                    delivery = [-d],
+                )
+            else
+                job
+            end
+        end for job in jobs
+    ]
+    shipments = [
+        Shipment(
+            amount = [round(Int, ref.delta[s.pickup.id+1])],
+            pickup = s.pickup,
+            delivery = s.delivery,
+        ) for s in shipments
+    ]
+    return vehicles, jobs, shipments
 end
 
 # Parses the `MathOptVRP.TimeWindows` constraints + `sum(t)` objective
