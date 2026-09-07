@@ -218,20 +218,6 @@ function MOI.add_variable(m::Optimizer)
     return MOI.VariableIndex(m.next_variable)
 end
 
-function MOI.supports_add_constrained_variable(
-    ::Optimizer,
-    ::Type{MOI.GreaterThan{Float64}},
-)
-    return true
-end
-
-function MOI.add_constrained_variable(m::Optimizer, ::MOI.GreaterThan{Float64})
-    v = MOI.add_variable(m)
-    m.next_constraint += 1
-    ci = MOI.ConstraintIndex{MOI.VariableIndex,MOI.GreaterThan{Float64}}(m.next_constraint)
-    return v, ci
-end
-
 function MOI.supports_constraint(
     ::Optimizer,
     ::Type{MOI.VariableIndex},
