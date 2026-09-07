@@ -7,7 +7,7 @@
 #     in `:+` nodes), lowered to a Vroom JSON `Problem` with one `Vehicle`
 #     per truck, one `Job` per plain customer/service, and one `Shipment`
 #     per pickup/delivery pair; or
-#   - a linear `sum(t)` objective over free `t[i] >= 0` variables plus one
+#   - a linear `sum(t)` objective over free `t[i]` variables plus one
 #     `MathOptVRP.TimeWindows` constraint per truck, lowered to a `Problem`
 #     with per-`Job` `time_windows`/`service`, reading each truck's total
 #     time back off Vroom's `"end"` step `arrival`.
@@ -211,30 +211,17 @@ function MOI.add_constrained_variables(m::Optimizer, set::MathOptVRP.PartitionPD
     return vars, ci
 end
 
-# `vrptw` declares free `t[i] >= 0` variables (one per truck,
-# not part of the `Partition`) purely so `sum(t)` can serve as the
-# objective; the bound itself carries no meaning to Vroom and is accepted
-# as a no-op. `variable_to_position` intentionally has no entry for these,
-# which is how the `TimeWindows` `MOI.add_constraint` method below tells a
-# `t` variable apart from a `Partition` node variable.
+# `vrptw` declares free `t[i]` variables (one per truck, not part of the
+# `Partition`) purely so `sum(t)` can serve as the objective; nonnegativity
+# is already implied by membership in the `TimeWindows`/`CapacitatedTimeWindows`
+# set (`t[i]` is that set's `route_end` entry). `variable_to_position`
+# intentionally has no entry for these, which is how the `TimeWindows`
+# `MOI.add_constraint` method below tells a `t` variable apart from a
+# `Partition` node variable.
 
 function MOI.add_variable(m::Optimizer)
     m.next_variable += 1
     return MOI.VariableIndex(m.next_variable)
-end
-
-function MOI.supports_add_constrained_variable(
-    ::Optimizer,
-    ::Type{MOI.GreaterThan{Float64}},
-)
-    return true
-end
-
-function MOI.add_constrained_variable(m::Optimizer, ::MOI.GreaterThan{Float64})
-    v = MOI.add_variable(m)
-    m.next_constraint += 1
-    ci = MOI.ConstraintIndex{MOI.VariableIndex,MOI.GreaterThan{Float64}}(m.next_constraint)
-    return v, ci
 end
 
 function MOI.supports_constraint(
