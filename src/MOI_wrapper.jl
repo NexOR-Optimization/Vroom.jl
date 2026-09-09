@@ -1,5 +1,5 @@
 # Minimal MOI wrapper. Scope is intentionally narrow: just enough to run
-# `MathOptVRP.Tests.test_vrp`, `test_tsp`, `test_vrppd` and `test_vrptw`.
+# `MathOptVRP.Tests.test_vrp`, `test_tsp`, `test_vrppd`, `test_vrptw` and `test_cvrp`.
 # We accept one `MathOptVRP.PartitionPD` set of
 # variables, either:
 #   - a `MOI.ScalarNonlinearFunction` objective built from
@@ -471,7 +471,9 @@ function MOI.add_constraint(
         if column === nothing
             column = pos[2]
         elseif column != pos[2]
-            error("Vroom: Capacity constraint mixes variables from columns $(column) and $(pos[2])")
+            error(
+                "Vroom: Capacity constraint mixes variables from columns $(column) and $(pos[2])",
+            )
         end
     end
     column === nothing && error("Vroom: Capacity constraint has no variables")
@@ -566,7 +568,8 @@ function _apply_capacity(
     ref = entries[1]
     for e in entries
         e.delta == ref.delta || error("Vroom: per-truck Capacity `delta` must agree")
-        e.capacity == ref.capacity || error("Vroom: per-truck Capacity `capacity` must agree")
+        e.capacity == ref.capacity ||
+            error("Vroom: per-truck Capacity `capacity` must agree")
     end
 
     capacity = [round(Int, ref.capacity)]
