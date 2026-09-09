@@ -6,6 +6,13 @@ import JSON
     id::Int
     start_index::Int
     end_index::Int
+    capacity::Vector{Int} = Int[]
+end
+
+function JSON.lower(v::Vehicle)
+    nt = (id = v.id, start_index = v.start_index, end_index = v.end_index)
+    isempty(v.capacity) && return nt
+    return merge(nt, (capacity = v.capacity,))
 end
 
 @kwdef struct Job
@@ -14,11 +21,13 @@ end
     setup::Int = 0
     service::Int = 0
     time_windows::Vector{Vector{Int}} = Vector{Int}[]
+    delivery::Vector{Int} = Int[]
+    pickup::Vector{Int} = Int[]
 end
 
 # VROOM rejects an explicit empty `time_windows` array (it errors with
 # "Invalid time_windows array for object"), so omit the key entirely when
-# there are no windows rather than serializing `[]`.
+# there are no windows (or amounts) rather than serializing `[]`.
 function JSON.lower(job::Job)
     nt = (
         id = job.id,
@@ -26,8 +35,10 @@ function JSON.lower(job::Job)
         setup = job.setup,
         service = job.service,
     )
-    isempty(job.time_windows) && return nt
-    return merge(nt, (time_windows = job.time_windows,))
+    isempty(job.time_windows) || (nt = merge(nt, (time_windows = job.time_windows,)))
+    isempty(job.delivery) || (nt = merge(nt, (delivery = job.delivery,)))
+    isempty(job.pickup) || (nt = merge(nt, (pickup = job.pickup,)))
+    return nt
 end
 
 @kwdef struct ShipmentStep

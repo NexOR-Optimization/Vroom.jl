@@ -9,6 +9,7 @@ using MathOptVRP
     MathOptVRP.Tests.test_vrp,
     MathOptVRP.Tests.test_vrppd,
     MathOptVRP.Tests.test_vrptw,
+    MathOptVRP.Tests.test_cvrp,
 ]
     test(Vroom.Optimizer)
 end
