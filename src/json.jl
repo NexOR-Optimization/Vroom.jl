@@ -122,17 +122,23 @@ struct Solution
     routes::Vector{Route}
 end
 
-function vroom(model::Problem)
-    solution = nothing
-    mktemp() do input, input_io
-        JSON.json(input_io, model)
-        flush(input_io)
-        mktemp() do output, _
-            vroom_jll.vroom() do exe
-                run(`$exe -i $input -o $output`)
-            end
-            return solution = JSON.parse(read(output, String), Solution)
-        end
+# The functions of JLL packages are compiled with `infer = false`, which a
+# trimmed (juliac) image cannot run. So build the command of `vroom_jll.vroom()`
+# from the paths set by `vroom_jll.__init__` instead, prepending the library
+# path of its dependencies (e.g. OpenSSL) as `JLLWrappers.adjust_ENV!` does.
+function _vroom_command()
+    libpath = vroom_jll.LIBPATH[]
+    current = get(ENV, JLLWrappers.LIBPATH_env, "")
+    if !isempty(current)
+        libpath = string(libpath, JLLWrappers.pathsep, current)
     end
-    return solution
+    return addenv(Cmd([vroom_jll.vroom_path]), JLLWrappers.LIBPATH_env => libpath)
+end
+
+# Pipe the problem to the executable and read the solution back, without
+# temporary files.
+function vroom(model::Problem)
+    input = IOBuffer(JSON.json(model))
+    output = read(pipeline(_vroom_command(); stdin = input), String)
+    return JSON.parse(output, Solution)
 end
