@@ -283,6 +283,8 @@ function _collect_sum_distances_leaves!(
 )
     if f.head == :+
         for a in f.args
+            # A zero, as the start of a sum, such as `sum` in Python.
+            _is_zero(a) && continue
             a isa MOI.ScalarNonlinearFunction ||
                 error("Vroom: unsupported `:+` arg of type $(typeof(a))")
             _collect_sum_distances_leaves!(leaves, a)
@@ -297,6 +299,8 @@ function _collect_sum_distances_leaves!(
     end
     return
 end
+
+_is_zero(@nospecialize(a)) = (a isa Int || a isa Float64) && iszero(a)
 
 function _parse_leaf(m::Optimizer, leaf::MOI.ScalarNonlinearFunction)
     length(leaf.args) == 2 ||

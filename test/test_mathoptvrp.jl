@@ -29,6 +29,14 @@ end
     optimize!(model)
     @test termination_status(model) == MOI.OPTIMAL
     @test objective_value(model) == 13
+    # A sum starting from zero, as `sum` in Python.
+    @objective(
+        model,
+        Min,
+        0 + sum(MathOptVRP.op_sum_distances(M, vcat(5, nodes[:, i], 5)) for i = 1:2),
+    )
+    optimize!(model)
+    @test objective_value(model) == 13
     tour = direct_model(Vroom.Optimizer())
     set_silent(tour)
     @variable(tour, x[1:4] in MathOptVRP.Permutation(4))
