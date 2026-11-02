@@ -1,0 +1,47 @@
+name: JuMPy backend
+on:
+  push:
+    branches: [main]
+  pull_request:
+    types: [opened, synchronize, reopened]
+jobs:
+  wheel:
+    name: Build and test jumpy-opt-vroom (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+      # The build script and the Python package of JuMPy.
+      - uses: actions/checkout@v4
+        with:
+          repository: NexOR-Optimization/JuMPy
+          ref: bl/solver-plugins
+          path: JuMPy
+      - uses: julia-actions/setup-julia@v2
+        with:
+          version: "1.13.2"
+      - uses: julia-actions/cache@v2
+      - name: Install JuliaC
+        run: julia --project=@juliac -e 'using Pkg; Pkg.add(PackageSpec(name="JuliaC", version="0.3.12"))'
+      - uses: astral-sh/setup-uv@v7
+        with:
+          python-version: "3.12"
+      - name: Build wheel
+        # Link for the macOS of the bundled Julia libraries, not the runner's.
+        env:
+          MACOSX_DEPLOYMENT_TARGET: "11.0"
+        run: uv run --no-project python JuMPy/julia/build_backend.py jumpy --wheel dist
+      # Outside the checkout, so that the tests import the installed packages.
+      - name: Test the installed wheel
+        working-directory: ${{ runner.temp }}
+        run: |
+          uv venv wheel-env
+          uv pip install --python wheel-env "$GITHUB_WORKSPACE/JuMPy" "$GITHUB_WORKSPACE"/dist/*.whl pytest
+          wheel-env/bin/python -m pytest -p no:cacheprovider "$GITHUB_WORKSPACE/jumpy/test_jumpy_vroom.py"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: jumpy-opt-vroom-${{ matrix.os }}
+          path: dist/*.whl
