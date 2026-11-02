@@ -184,16 +184,33 @@ end
 # Variables
 #
 # `PartitionPD` is a `num_rows × num_trucks` matrix flattened column-major
-# by `JuMP.build_variable`. Plain `Partition` models reach this constructor
-# through MathOptVRP's `PartitionToPartitionPDBridge`, with zero pairs.
+# by `JuMP.build_variable`. A `Partition` is a `PartitionPD` with zero pairs,
+# and a `Permutation` is a `Partition` with one truck; they are supported
+# directly so that models without bridges, such as JuMP direct models, can
+# use them.
 _partition_dims(set::MathOptVRP.PartitionPD) =
     (set.num_services + 2 * set.num_pickup_deliveries, set.num_trucks)
 
-function MOI.supports_add_constrained_variables(::Optimizer, ::Type{MathOptVRP.PartitionPD})
+const _Partitions =
+    Union{MathOptVRP.PartitionPD,MathOptVRP.Partition,MathOptVRP.Permutation}
+
+function MOI.supports_add_constrained_variables(::Optimizer, ::Type{<:_Partitions})
     return true
 end
 
-function MOI.add_constrained_variables(m::Optimizer, set::MathOptVRP.PartitionPD)
+_partition_pd(set::MathOptVRP.PartitionPD) = set
+_partition_pd(set::MathOptVRP.Partition) = convert(MathOptVRP.PartitionPD, set)
+_partition_pd(set::MathOptVRP.Permutation) =
+    _partition_pd(convert(MathOptVRP.Partition, set))
+
+function MOI.add_constrained_variables(m::Optimizer, set::_Partitions)
+    vars = _add_partition(m, _partition_pd(set))
+    m.next_constraint += 1
+    ci = MOI.ConstraintIndex{MOI.VectorOfVariables,typeof(set)}(m.next_constraint)
+    return vars, ci
+end
+
+function _add_partition(m::Optimizer, set::MathOptVRP.PartitionPD)
     m.partition === nothing ||
         error("Vroom: only one MathOptVRP.PartitionPD set is supported per model")
     n_rows, n_cols = _partition_dims(set)
@@ -211,9 +228,7 @@ function MOI.add_constrained_variables(m::Optimizer, set::MathOptVRP.PartitionPD
         m.variable_to_position[v] = (row, col)
     end
     m.partition = set
-    m.next_constraint += 1
-    ci = MOI.ConstraintIndex{MOI.VectorOfVariables,typeof(set)}(m.next_constraint)
-    return vars, ci
+    return vars
 end
 
 # `vrptw` declares free `t[i]` variables (one per truck, not part of the
