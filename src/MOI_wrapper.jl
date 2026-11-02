@@ -56,6 +56,8 @@ mutable struct Optimizer <: MOI.AbstractOptimizer
     # Solution state, populated by `optimize!`.
     solved::Bool
     routes::Vector{Vector{Int}}
+    # The total time of each truck, off the `"end"` step's `arrival`.
+    truck_times::Vector{Int}
     objective_value::Int
     termination_status::MOI.TerminationStatusCode
     primal_status::MOI.ResultStatusCode
@@ -75,6 +77,7 @@ mutable struct Optimizer <: MOI.AbstractOptimizer
             nothing,
             false,
             Vector{Int}[],
+            Int[],
             0,
             MOI.OPTIMIZE_NOT_CALLED,
             MOI.NO_SOLUTION,
@@ -105,6 +108,7 @@ function MOI.empty!(m::Optimizer)
     empty!(m.capacity_by_column)
     m.solved = false
     empty!(m.routes)
+    empty!(m.truck_times)
     m.objective_value = 0
     m.termination_status = MOI.OPTIMIZE_NOT_CALLED
     m.primal_status = MOI.NO_SOLUTION
@@ -782,6 +786,7 @@ function _solve!(
     end
 
     m.routes = routes
+    m.truck_times = truck_time
     m.objective_value = compute_objective(sol, truck_time)
     m.solved = true
     if sol.code == 0
@@ -843,10 +848,18 @@ function MOI.get(m::Optimizer, attr::MOI.ObjectiveValue)
     return Float64(m.objective_value)
 end
 
-# Map each zero-padded Partition proxy to its position in Vroom's route.
+# Map each zero-padded Partition proxy to its position in Vroom's route, and
+# the `route_end` variable of each `TimeWindows` to the total time of its truck.
 function MOI.get(m::Optimizer, attr::MOI.VariablePrimal, vi::MOI.VariableIndex)
     MOI.check_result_index_bounds(m, attr)
-    row, column = m.variable_to_position[vi]
+    position = get(m.variable_to_position, vi, nothing)
+    if position === nothing
+        for (column, entry) in m.time_windows_by_column
+            entry.t_var == vi && return Float64(m.truck_times[column])
+        end
+        throw(MOI.InvalidIndex(vi))
+    end
+    row, column = position
     route = m.routes[column]
     return Float64(row <= length(route) ? route[row] : 0)
 end

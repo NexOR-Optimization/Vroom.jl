@@ -36,4 +36,27 @@ end
     optimize!(tour)
     @test termination_status(tour) == MOI.OPTIMAL
     @test sort(round.(Int, value.(x))) == 1:4
+    # The route end of a time window is the total time of its truck.
+    timed = direct_model(Vroom.Optimizer())
+    set_silent(timed)
+    @variable(timed, t[1:2] >= 0)
+    @variable(timed, y[1:4, 1:2] in MathOptVRP.Partition(4, 2))
+    order = [1, 2, 3, 4, 5, 5]
+    for i = 1:2
+        @constraint(
+            timed,
+            [t[i]; 5; y[:, i]; 6] in MathOptVRP.TimeWindows{MathOptVRP.WITHOUT_START_TIME}(
+                M[order, order],
+                zeros(Int, 6),
+                fill(100, 6),
+                [1, 1, 1, 1, 0, 0],
+                4,
+            )
+        )
+    end
+    @objective(timed, Min, sum(t))
+    optimize!(timed)
+    @test termination_status(timed) == MOI.OPTIMAL
+    @test sum(value.(t)) ≈ objective_value(timed)
+    @test all(>=(0), value.(t)) && maximum(value.(t)) > 0
 end
