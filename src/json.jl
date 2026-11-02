@@ -136,9 +136,16 @@ function _vroom_command()
 end
 
 # Pipe the problem to the executable and read the solution back, without
-# temporary files.
+# temporary files. The standard error is captured for the error message,
+# so that the redirections do not depend on those of the Julia process.
 function vroom(model::Problem)
     input = IOBuffer(JSON.json(model))
-    output = read(pipeline(_vroom_command(); stdin = input), String)
+    errors = IOBuffer()
+    output = try
+        read(pipeline(_vroom_command(); stdin = input, stderr = errors), String)
+    catch err
+        err isa ProcessFailedException || rethrow()
+        error("vroom failed: ", String(take!(errors)))
+    end
     return JSON.parse(output, Solution)
 end
