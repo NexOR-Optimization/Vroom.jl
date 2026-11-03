@@ -9,7 +9,7 @@ Vroom = "7b1a88cc-e3cf-4743-80d1-c4827652cc7c"
 
 [sources]
 JuMPy = {url = "https://github.com/NexOR-Optimization/JuMPy.git", subdir = "julia", rev = "bl/solver-plugins"}
-MathOptVRP = {url = "https://github.com/NexOR-Optimization/MathOptVRP.jl", rev = "bl/jumpy"}
+MathOptVRP = {url = "https://github.com/NexOR-Optimization/MathOptVRP.jl", rev = "main"}
 Vroom = {path = ".."}
 
 [compat]
