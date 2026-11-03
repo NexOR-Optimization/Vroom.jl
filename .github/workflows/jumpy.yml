@@ -14,12 +14,12 @@ jobs:
         os: [ubuntu-latest, macos-latest]
     steps:
       - uses: actions/checkout@v4
-      # The build script and the Python package of JuMPy.
+      # The build script and the Python package of JuMPy, outside of `jumpy/`
+      # that a case-insensitive file system (macOS) would confuse with `JuMPy/`.
       - uses: actions/checkout@v4
         with:
           repository: NexOR-Optimization/JuMPy
-          ref: bl/solver-plugins
-          path: JuMPy
+          path: deps/JuMPy
       - uses: julia-actions/setup-julia@v2
         with:
           version: "1.13.2"
@@ -33,13 +33,13 @@ jobs:
         # Link for the macOS of the bundled Julia libraries, not the runner's.
         env:
           MACOSX_DEPLOYMENT_TARGET: "11.0"
-        run: uv run --no-project python JuMPy/julia/build_backend.py jumpy --wheel dist
+        run: uv run --no-project python deps/JuMPy/julia/build_backend.py jumpy --wheel dist
       # Outside the checkout, so that the tests import the installed packages.
       - name: Test the installed wheel
         working-directory: ${{ runner.temp }}
         run: |
           uv venv wheel-env
-          uv pip install --python wheel-env "$GITHUB_WORKSPACE/JuMPy" "$GITHUB_WORKSPACE"/dist/*.whl pytest
+          uv pip install --python wheel-env "$GITHUB_WORKSPACE/deps/JuMPy" "$GITHUB_WORKSPACE"/dist/*.whl pytest
           wheel-env/bin/python -m pytest -p no:cacheprovider "$GITHUB_WORKSPACE/jumpy/test_jumpy_vroom.py"
       - uses: actions/upload-artifact@v4
         with:
