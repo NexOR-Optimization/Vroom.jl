@@ -1,6 +1,6 @@
 # Traced in ordinary Julia before building the image with JuMPy's
 # julia/build_backend.py. It builds and solves, through the C ABI as Python
-# does, the VRP, TSP and VRPTW models of MathOptVRP's tests.
+# does, the VRP, CVRP, TSP and VRPTW models of MathOptVRP's tests.
 import JuMPy
 import JuMPyVroom
 
@@ -34,6 +34,29 @@ let m = J.jumpy_new_model(), n = 4, k = 2
     @assert J.jumpy_optimize(m) == 1
     J.jumpy_objective_value(m)
     J.jumpy_has_values(m)
+    routes(m, nodes, n, k)
+    J.jumpy_free_model(m)
+end
+
+# CVRP: each customer loads 2 units on trucks of capacity 4.
+let m = J.jumpy_new_model(), n = 4, k = 2
+    set = C.new_set(J, "MathOptVRP.Partition", n, k)
+    nodes = C.constrained_variables(J, m, (n, k), set)
+    J.jumpy_free_set(set)
+    distances = C.array(J, m, DISTANCES)
+    depot = C.constant(J, m, n + 1)
+    objective = C.constant(J, m, 0)
+    for j = 1:k
+        column = C.index(J, m, nodes, 1:n, j)
+        name = "MathOptVRP.Capacity"
+        @assert C.add_constraint(J, m, column, name, fill(2.0, n), 4.0) != C_NULL
+        route = C.concatenate(J, m, depot, column, depot)
+        cost = C.nonlinear(J, m, "sum_distances", distances, route)
+        objective = C.apply(J, m, "+", objective, cost)
+    end
+    C.set_objective(J, m, 0, objective)
+    @assert J.jumpy_optimize(m) == 1
+    J.jumpy_objective_value(m)
     routes(m, nodes, n, k)
     J.jumpy_free_model(m)
 end

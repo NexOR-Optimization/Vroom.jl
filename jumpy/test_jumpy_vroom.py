@@ -56,6 +56,27 @@ def test_vrp():
     assert model.objective_value() == sum(distance(route) for route in solution) == 13
 
 
+def test_cvrp():
+    model = jp.Model()
+    n, k = 4, 2
+    nodes = model.variables((n, k), jp.MathOptVRP.Partition(n, k))
+    for j in range(k):
+        # Each customer loads 2 units and a truck carries at most 4.
+        model.constraint(nodes[:, j], jp.MathOptVRP.Capacity([2] * n, 4))
+    model.objective = jp.minimize(
+        sum(
+            jp.MathOptVRP.op_sum_distances(DISTANCES, jp.vcat(DEPOT, nodes[:, j], DEPOT))
+            for j in range(k)
+        )
+    )
+    assert model.optimize() == 1
+    solution = routes(model, nodes)
+    assert sorted(customer for route in solution for customer in route) == [1, 2, 3, 4]
+    assert all(len(route) <= 2 for route in solution)
+    # Without the capacity, a single truck visits all customers for 13.
+    assert model.objective_value() == sum(distance(route) for route in solution) > 13
+
+
 def test_tsp():
     model = jp.Model()
     tour = model.variables(4, jp.MathOptVRP.Permutation(4))
@@ -94,8 +115,10 @@ def test_vrptw():
 
 def test_registry():
     VRP = jp.MathOptVRP
-    assert {"Partition", "PartitionPD", "Permutation", "TimeWindows"} <= set(dir(VRP))
+    assert {"Capacity", "Partition", "PartitionPD", "Permutation", "TimeWindows"} <= set(
+        dir(VRP)
+    )
     assert "op_sum_distances" in dir(VRP)
     assert dir(jp.MOI) == ["GreaterThan"]
     with pytest.raises(AttributeError, match="not exposed"):
-        VRP.Capacity
+        VRP.RouteOrder
