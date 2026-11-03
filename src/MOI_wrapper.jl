@@ -29,6 +29,13 @@ struct _TimeWindowsEntry
     service::Vector{Int}
 end
 
+# The data of one `MathOptVRP.Capacity` constraint, rounded to Vroom's
+# integers when the constraint is added, as for `_TimeWindowsEntry`.
+struct _CapacityEntry
+    delta::Vector{Int}
+    capacity::Int
+end
+
 mutable struct Optimizer <: MOI.AbstractOptimizer
     next_variable::Int
     next_constraint::Int
@@ -50,7 +57,7 @@ mutable struct Optimizer <: MOI.AbstractOptimizer
     time_windows_by_column::Dict{Int,_TimeWindowsEntry}
     # One `MathOptVRP.Capacity` constraint per truck column, keyed by
     # column; populated by `add_constraint`, consumed by `optimize!`.
-    capacity_by_column::Dict{Int,MathOptVRP.Capacity}
+    capacity_by_column::Dict{Int,_CapacityEntry}
     silent::Bool
     time_limit::Union{Nothing,Float64}
     # Solution state, populated by `optimize!`.
@@ -72,7 +79,7 @@ mutable struct Optimizer <: MOI.AbstractOptimizer
             MOI.FEASIBILITY_SENSE,
             nothing,
             Dict{Int,_TimeWindowsEntry}(),
-            Dict{Int,MathOptVRP.Capacity}(),
+            Dict{Int,_CapacityEntry}(),
             false,
             nothing,
             false,
@@ -497,8 +504,8 @@ end
 # truck's `PartitionPD` column (`nodes[:, i]`), so `delta` is
 # indexed by node id (one-based, matching `Job.id`/`ShipmentStep.id`) and
 # not by column row/position. We only need to know which column the
-# constraint belongs to; `delta`/`capacity` themselves are consumed
-# straight off `s` in `optimize!`.
+# constraint belongs to; `delta`/`capacity` themselves are consumed in
+# `optimize!`.
 
 function MOI.supports_constraint(
     ::Optimizer,
@@ -537,7 +544,8 @@ function MOI.add_constraint(
     haskey(m.capacity_by_column, column) &&
         error("Vroom: only one Capacity constraint per truck column is supported")
 
-    m.capacity_by_column[column] = s
+    m.capacity_by_column[column] =
+        _CapacityEntry(round.(Int, s.delta), round(Int, s.capacity))
     m.next_constraint += 1
     return MOI.ConstraintIndex{typeof(f),typeof(s)}(m.next_constraint)
 end
@@ -602,7 +610,7 @@ function _lower_sum_distances(m::Optimizer)
     return vehicles, jobs, shipments, durations, leaf_columns
 end
 
-# Applies `m.capacity_by_column` (one `MathOptVRP.Capacity` per truck
+# Applies `m.capacity_by_column` (one `_CapacityEntry` per truck
 # column, all sharing the same `delta`/`capacity`) on top of already-built
 # `vehicles`/`jobs`/`shipments`: gives every vehicle the shared capacity
 # and every job/shipment its load contribution, read off `delta` by node
@@ -629,7 +637,7 @@ function _apply_capacity(
             error("Vroom: per-truck Capacity `capacity` must agree")
     end
 
-    capacity = [round(Int, ref.capacity)]
+    capacity = [ref.capacity]
     vehicles = [
         Vehicle(
             id = v.id,
@@ -639,7 +647,7 @@ function _apply_capacity(
         ) for v in vehicles
     ]
     jobs = [
-        let d = round(Int, ref.delta[job.id+1])
+        let d = ref.delta[job.id+1]
             if d > 0
                 Job(
                     id = job.id,
@@ -665,7 +673,7 @@ function _apply_capacity(
     ]
     shipments = [
         Shipment(
-            amount = [round(Int, ref.delta[s.pickup.id+1])],
+            amount = [ref.delta[s.pickup.id+1]],
             pickup = s.pickup,
             delivery = s.delivery,
         ) for s in shipments
