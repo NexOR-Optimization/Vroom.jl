@@ -17,11 +17,23 @@ import MathOptVRP
 
 # Per-truck data parsed out of one `MathOptVRP.TimeWindows` constraint;
 # see `MOI.add_constraint(::Optimizer, ::MOI.VectorAffineFunction, ::MathOptVRP.TimeWindows)`.
+# The set data is rounded to Vroom's integers when the constraint is added,
+# so that the fields have concrete types whatever the set's value type.
 struct _TimeWindowsEntry
     t_var::MOI.VariableIndex
     depot_start::Int
     depot_end::Int
-    set::MathOptVRP.TimeWindows
+    travel::Matrix{Int}
+    earliest::Vector{Int}
+    latest::Vector{Int}
+    service::Vector{Int}
+end
+
+# The data of one `MathOptVRP.Capacity` constraint, rounded to Vroom's
+# integers when the constraint is added, as for `_TimeWindowsEntry`.
+struct _CapacityEntry
+    delta::Vector{Int}
+    capacity::Int
 end
 
 mutable struct Optimizer <: MOI.AbstractOptimizer
@@ -45,12 +57,14 @@ mutable struct Optimizer <: MOI.AbstractOptimizer
     time_windows_by_column::Dict{Int,_TimeWindowsEntry}
     # One `MathOptVRP.Capacity` constraint per truck column, keyed by
     # column; populated by `add_constraint`, consumed by `optimize!`.
-    capacity_by_column::Dict{Int,MathOptVRP.Capacity}
+    capacity_by_column::Dict{Int,_CapacityEntry}
     silent::Bool
     time_limit::Union{Nothing,Float64}
     # Solution state, populated by `optimize!`.
     solved::Bool
     routes::Vector{Vector{Int}}
+    # The total time of each truck, off the `"end"` step's `arrival`.
+    truck_times::Vector{Int}
     objective_value::Int
     termination_status::MOI.TerminationStatusCode
     primal_status::MOI.ResultStatusCode
@@ -65,11 +79,12 @@ mutable struct Optimizer <: MOI.AbstractOptimizer
             MOI.FEASIBILITY_SENSE,
             nothing,
             Dict{Int,_TimeWindowsEntry}(),
-            Dict{Int,MathOptVRP.Capacity}(),
+            Dict{Int,_CapacityEntry}(),
             false,
             nothing,
             false,
             Vector{Int}[],
+            Int[],
             0,
             MOI.OPTIMIZE_NOT_CALLED,
             MOI.NO_SOLUTION,
@@ -100,6 +115,7 @@ function MOI.empty!(m::Optimizer)
     empty!(m.capacity_by_column)
     m.solved = false
     empty!(m.routes)
+    empty!(m.truck_times)
     m.objective_value = 0
     m.termination_status = MOI.OPTIMIZE_NOT_CALLED
     m.primal_status = MOI.NO_SOLUTION
@@ -179,16 +195,33 @@ end
 # Variables
 #
 # `PartitionPD` is a `num_rows × num_trucks` matrix flattened column-major
-# by `JuMP.build_variable`. Plain `Partition` models reach this constructor
-# through MathOptVRP's `PartitionToPartitionPDBridge`, with zero pairs.
+# by `JuMP.build_variable`. A `Partition` is a `PartitionPD` with zero pairs,
+# and a `Permutation` is a `Partition` with one truck; they are supported
+# directly so that models without bridges, such as JuMP direct models, can
+# use them.
 _partition_dims(set::MathOptVRP.PartitionPD) =
     (set.num_services + 2 * set.num_pickup_deliveries, set.num_trucks)
 
-function MOI.supports_add_constrained_variables(::Optimizer, ::Type{MathOptVRP.PartitionPD})
+const _Partitions =
+    Union{MathOptVRP.PartitionPD,MathOptVRP.Partition,MathOptVRP.Permutation}
+
+function MOI.supports_add_constrained_variables(::Optimizer, ::Type{<:_Partitions})
     return true
 end
 
-function MOI.add_constrained_variables(m::Optimizer, set::MathOptVRP.PartitionPD)
+_partition_pd(set::MathOptVRP.PartitionPD) = set
+_partition_pd(set::MathOptVRP.Partition) = convert(MathOptVRP.PartitionPD, set)
+_partition_pd(set::MathOptVRP.Permutation) =
+    _partition_pd(convert(MathOptVRP.Partition, set))
+
+function MOI.add_constrained_variables(m::Optimizer, set::_Partitions)
+    vars = _add_partition(m, _partition_pd(set))
+    m.next_constraint += 1
+    ci = MOI.ConstraintIndex{MOI.VectorOfVariables,typeof(set)}(m.next_constraint)
+    return vars, ci
+end
+
+function _add_partition(m::Optimizer, set::MathOptVRP.PartitionPD)
     m.partition === nothing ||
         error("Vroom: only one MathOptVRP.PartitionPD set is supported per model")
     n_rows, n_cols = _partition_dims(set)
@@ -206,9 +239,7 @@ function MOI.add_constrained_variables(m::Optimizer, set::MathOptVRP.PartitionPD
         m.variable_to_position[v] = (row, col)
     end
     m.partition = set
-    m.next_constraint += 1
-    ci = MOI.ConstraintIndex{MOI.VectorOfVariables,typeof(set)}(m.next_constraint)
-    return vars, ci
+    return vars
 end
 
 # `vrptw` declares free `t[i]` variables (one per truck, not part of the
@@ -259,6 +290,8 @@ function _collect_sum_distances_leaves!(
 )
     if f.head == :+
         for a in f.args
+            # A zero, as the start of a sum, such as `sum` in Python.
+            _is_zero(a) && continue
             a isa MOI.ScalarNonlinearFunction ||
                 error("Vroom: unsupported `:+` arg of type $(typeof(a))")
             _collect_sum_distances_leaves!(leaves, a)
@@ -274,21 +307,17 @@ function _collect_sum_distances_leaves!(
     return
 end
 
+_is_zero(@nospecialize(a)) = (a isa Int || a isa Float64) && iszero(a)
+
 function _parse_leaf(m::Optimizer, leaf::MOI.ScalarNonlinearFunction)
     length(leaf.args) == 2 ||
         error("Vroom: `:sum_distances` expects 2 args, got $(length(leaf.args))")
-    matrix = leaf.args[1]
-    matrix isa AbstractMatrix{<:Real} ||
-        error("Vroom: `:sum_distances` arg 1 must be a real matrix; got $(typeof(matrix))")
-    items = _normalize_items(leaf.args[2])
+    matrix = _durations(leaf.args[1])
+    items = _untyped_items(leaf.args[2])
     length(items) >= 3 ||
         error("Vroom: `:sum_distances` vector must be `[depot; col; depot]`")
-    items[1] isa Real ||
-        error("Vroom: depot_start must be a `Real`; got $(typeof(items[1]))")
-    items[end] isa Real ||
-        error("Vroom: depot_end must be a `Real`; got $(typeof(items[end]))")
-    depot_start = round(Int, items[1])
-    depot_end = round(Int, items[end])
+    depot_start = _node(items[1], "depot_start")
+    depot_end = _node(items[end], "depot_end")
     depot_start == depot_end || error("Vroom: depot_start != depot_end is not supported")
     depot = depot_start - 1 # MOI node values are one-based; Vroom is zero-based.
     # All interior items must be partition variables of one column.
@@ -313,41 +342,73 @@ function _parse_leaf(m::Optimizer, leaf::MOI.ScalarNonlinearFunction)
     return matrix, depot, column::Int
 end
 
+# The arguments of a `MOI.ScalarNonlinearFunction` are untyped. The functions
+# below check for the concrete types that JuMP produces before falling back to
+# generic code, so that the common cases need no dynamic dispatch, as required
+# by a trimmed (juliac) image. Each function receiving an untyped value has a
+# single `@nospecialize` method, so that its call is resolved statically.
+
+# Vroom only supports integer durations.
+function _durations(@nospecialize(matrix))::Matrix{Int}
+    matrix isa Matrix{Int} && return matrix
+    matrix isa Matrix{Float64} && return round.(Int, matrix)
+    matrix isa AbstractMatrix{<:Real} && return round.(Int, matrix)
+    return error(
+        "Vroom: `:sum_distances` arg 1 must be a real matrix; got $(typeof(matrix))",
+    )
+end
+
+# A node entry: a partition variable or a constant one-based node index.
+const _Item = Union{MOI.VariableIndex,Float64}
+
 # JuMP can hand us the second `:sum_distances` arg as either a raw
-# `AbstractVector` of mixed `Real`s and `MOI.VariableIndex`s (the path
-# via MathOptVRP's `moi_function(::Array)` type piracy), or — when JuMP
+# `AbstractVector` of mixed `Real`s and `MOI.VariableIndex`s, or — when JuMP
 # promotes `vcat(depot::Int, ::Vector{VariableRef}, depot::Int)` to a
 # `Vector{AffExpr}` — as a `MOI.VectorAffineFunction`. Normalise both
-# into a `Vector{Any}` of constants / `VariableIndex` per row.
-function _normalize_items(raw)
-    if raw isa MOI.VectorOfVariables
-        return Any[vi for vi in raw.variables]
-    elseif raw isa MOI.VectorAffineFunction
-        n = length(raw.constants)
-        T = eltype(raw.constants)
-        per_row = [MOI.ScalarAffineTerm{T}[] for _ = 1:n]
-        for vt in raw.terms
-            push!(per_row[vt.output_index], vt.scalar_term)
-        end
-        return Any[
-            _simplify_item(MOI.ScalarAffineFunction(per_row[i], raw.constants[i])) for
-            i = 1:n
-        ]
-    elseif raw isa AbstractVector
-        return Any[_simplify_item(el) for el in raw]
-    end
+# into a vector of constants / `VariableIndex` per row.
+function _untyped_items(@nospecialize(raw))::Vector{_Item}
+    raw isa MOI.VectorAffineFunction{Float64} && return _normalize_items(raw)
+    raw isa MOI.VectorOfVariables && return _normalize_items(raw)
+    raw isa Vector{Any} && return _Item[_item(el) for el in raw]
+    raw isa AbstractVector && return _Item[_item(el) for el in raw]
     return error("Vroom: `:sum_distances` arg 2 has unexpected type $(typeof(raw))")
 end
 
-_simplify_item(x) = x
-function _simplify_item(f::MOI.ScalarAffineFunction)
+_normalize_items(raw::MOI.VectorOfVariables) = _Item[vi for vi in raw.variables]
+
+function _normalize_items(raw::MOI.VectorAffineFunction{Float64})
+    n = length(raw.constants)
+    per_row = [MOI.ScalarAffineTerm{Float64}[] for _ = 1:n]
+    for vt in raw.terms
+        push!(per_row[vt.output_index], vt.scalar_term)
+    end
+    return _Item[
+        _affine_item(MOI.ScalarAffineFunction(per_row[i], raw.constants[i])) for i = 1:n
+    ]
+end
+
+function _item(@nospecialize(x))::_Item
+    x isa MOI.VariableIndex && return x
+    x isa Float64 && return x
+    x isa Int && return Float64(x)
+    x isa MOI.ScalarAffineFunction{Float64} && return _affine_item(x)
+    x isa Real && return Float64(x)
+    return error("Vroom: unsupported node entry of type $(typeof(x))")
+end
+
+function _affine_item(f::MOI.ScalarAffineFunction{Float64})
     if isempty(f.terms)
         return f.constant
     end
     if length(f.terms) == 1 && iszero(f.constant) && isone(f.terms[1].coefficient)
         return f.terms[1].variable
     end
-    return f
+    return error("Vroom: node entries must be variables or constants; got $f")
+end
+
+function _node(item::_Item, name::String)
+    item isa Float64 || error("Vroom: $name must be a constant; got a variable")
+    return round(Int, item)
 end
 
 # A `PartitionPD` node is either a `Job` (service) or one half of a
@@ -399,17 +460,12 @@ function MOI.add_constraint(
         "Vroom: TimeWindows constraint expects $(MOI.dimension(s)) entries, got ",
         "$(length(items))",
     )
-    items[1] isa MOI.VariableIndex || error(
-        "Vroom: TimeWindows entry 1 (`route_end`) must be a variable; got ",
-        "$(typeof(items[1]))",
-    )
-    items[2] isa Real || error("Vroom: TimeWindows entry 2 (first_node) must be a `Real`")
-    items[end] isa Real ||
-        error("Vroom: TimeWindows last entry (last_node) must be a `Real`")
+    items[1] isa MOI.VariableIndex ||
+        error("Vroom: TimeWindows entry 1 (`route_end`) must be a variable")
     # One-based indices into `s.travel`/`s.earliest`/`s.latest`/`s.service`;
     # zero-based below to match Vroom's location indexing.
-    depot_start = round(Int, items[2]) - 1
-    depot_end = round(Int, items[end]) - 1
+    depot_start = _node(items[2], "TimeWindows entry 2 (first_node)") - 1
+    depot_end = _node(items[end], "TimeWindows last entry (last_node)") - 1
     column = nothing
     for k = 3:(length(items)-1)
         it = items[k]
@@ -430,7 +486,15 @@ function MOI.add_constraint(
         error("Vroom: only one TimeWindows constraint per truck column is supported")
 
     t_var = items[1]::MOI.VariableIndex
-    m.time_windows_by_column[column] = _TimeWindowsEntry(t_var, depot_start, depot_end, s)
+    m.time_windows_by_column[column] = _TimeWindowsEntry(
+        t_var,
+        depot_start,
+        depot_end,
+        round.(Int, s.travel),
+        round.(Int, s.earliest),
+        round.(Int, s.latest),
+        round.(Int, s.service),
+    )
     m.next_constraint += 1
     return MOI.ConstraintIndex{typeof(f),typeof(s)}(m.next_constraint)
 end
@@ -440,8 +504,8 @@ end
 # truck's `PartitionPD` column (`nodes[:, i]`), so `delta` is
 # indexed by node id (one-based, matching `Job.id`/`ShipmentStep.id`) and
 # not by column row/position. We only need to know which column the
-# constraint belongs to; `delta`/`capacity` themselves are consumed
-# straight off `s` in `optimize!`.
+# constraint belongs to; `delta`/`capacity` themselves are consumed in
+# `optimize!`.
 
 function MOI.supports_constraint(
     ::Optimizer,
@@ -480,7 +544,8 @@ function MOI.add_constraint(
     haskey(m.capacity_by_column, column) &&
         error("Vroom: only one Capacity constraint per truck column is supported")
 
-    m.capacity_by_column[column] = s
+    m.capacity_by_column[column] =
+        _CapacityEntry(round.(Int, s.delta), round(Int, s.capacity))
     m.next_constraint += 1
     return MOI.ConstraintIndex{typeof(f),typeof(s)}(m.next_constraint)
 end
@@ -526,7 +591,7 @@ function _lower_sum_distances(m::Optimizer)
     sort(leaf_columns) == collect(1:n_trucks) ||
         error("Vroom: `:sum_distances` columns are not a permutation of 1:$(n_trucks)")
 
-    durations = Matrix{Int}(round.(Int, matrix_ref))
+    durations = matrix_ref
     n_locations = size(durations, 1)
     n_locations == size(durations, 2) ||
         error("Vroom: distance matrix must be square; got $(size(durations))")
@@ -545,7 +610,7 @@ function _lower_sum_distances(m::Optimizer)
     return vehicles, jobs, shipments, durations, leaf_columns
 end
 
-# Applies `m.capacity_by_column` (one `MathOptVRP.Capacity` per truck
+# Applies `m.capacity_by_column` (one `_CapacityEntry` per truck
 # column, all sharing the same `delta`/`capacity`) on top of already-built
 # `vehicles`/`jobs`/`shipments`: gives every vehicle the shared capacity
 # and every job/shipment its load contribution, read off `delta` by node
@@ -572,7 +637,7 @@ function _apply_capacity(
             error("Vroom: per-truck Capacity `capacity` must agree")
     end
 
-    capacity = [round(Int, ref.capacity)]
+    capacity = [ref.capacity]
     vehicles = [
         Vehicle(
             id = v.id,
@@ -582,7 +647,7 @@ function _apply_capacity(
         ) for v in vehicles
     ]
     jobs = [
-        let d = round(Int, ref.delta[job.id+1])
+        let d = ref.delta[job.id+1]
             if d > 0
                 Job(
                     id = job.id,
@@ -608,7 +673,7 @@ function _apply_capacity(
     ]
     shipments = [
         Shipment(
-            amount = [round(Int, ref.delta[s.pickup.id+1])],
+            amount = [ref.delta[s.pickup.id+1]],
             pickup = s.pickup,
             delivery = s.delivery,
         ) for s in shipments
@@ -639,17 +704,16 @@ function _lower_time_windows(m::Optimizer)
         "time variables",
     )
 
-    ref = entries[1].set
+    ref = entries[1]
     depot_start = entries[1].depot_start
     depot_end = entries[1].depot_end
     for e in entries
-        e.set.travel == ref.travel ||
+        e.travel == ref.travel ||
             error("Vroom: per-truck TimeWindows travel matrices must be equal")
-        e.set.earliest == ref.earliest ||
+        e.earliest == ref.earliest ||
             error("Vroom: per-truck TimeWindows `earliest` must agree")
-        e.set.latest == ref.latest ||
-            error("Vroom: per-truck TimeWindows `latest` must agree")
-        e.set.service == ref.service ||
+        e.latest == ref.latest || error("Vroom: per-truck TimeWindows `latest` must agree")
+        e.service == ref.service ||
             error("Vroom: per-truck TimeWindows `service` must agree")
         e.depot_start == depot_start ||
             error("Vroom: per-truck TimeWindows first_node (depot_start) must agree")
@@ -657,7 +721,7 @@ function _lower_time_windows(m::Optimizer)
             error("Vroom: per-truck TimeWindows last_node (depot_end) must agree")
     end
 
-    durations = Matrix{Int}(round.(Int, ref.travel))
+    durations = ref.travel
     n_locations = size(durations, 1)
     n_locations == size(durations, 2) ||
         error("Vroom: distance matrix must be square; got $(size(durations))")
@@ -679,11 +743,8 @@ function _lower_time_windows(m::Optimizer)
         Job(
             id = loc,
             location_index = loc,
-            service = round(Int, ref.service[loc+1]),
-            time_windows = [[
-                round(Int, ref.earliest[loc+1]),
-                round(Int, ref.latest[loc+1]),
-            ]],
+            service = ref.service[loc+1],
+            time_windows = [[ref.earliest[loc+1], ref.latest[loc+1]]],
         ) for loc in customer_locs
     ]
     return vehicles, jobs, Shipment[], durations, collect(1:n_trucks)
@@ -737,6 +798,7 @@ function _solve!(
     end
 
     m.routes = routes
+    m.truck_times = truck_time
     m.objective_value = compute_objective(sol, truck_time)
     m.solved = true
     if sol.code == 0
@@ -798,10 +860,18 @@ function MOI.get(m::Optimizer, attr::MOI.ObjectiveValue)
     return Float64(m.objective_value)
 end
 
-# Map each zero-padded Partition proxy to its position in Vroom's route.
+# Map each zero-padded Partition proxy to its position in Vroom's route, and
+# the `route_end` variable of each `TimeWindows` to the total time of its truck.
 function MOI.get(m::Optimizer, attr::MOI.VariablePrimal, vi::MOI.VariableIndex)
     MOI.check_result_index_bounds(m, attr)
-    row, column = m.variable_to_position[vi]
+    position = get(m.variable_to_position, vi, nothing)
+    if position === nothing
+        for (column, entry) in m.time_windows_by_column
+            entry.t_var == vi && return Float64(m.truck_times[column])
+        end
+        throw(MOI.InvalidIndex(vi))
+    end
+    row, column = position
     route = m.routes[column]
     return Float64(row <= length(route) ? route[row] : 0)
 end

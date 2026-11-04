@@ -4,6 +4,7 @@ version = "0.1.0"
 authors = ["Benoît Legat <benoit.legat@gmail.com>"]
 
 [deps]
+JLLWrappers = "692b3bcd-3c85-4b1f-b108-f13ce0eb3210"
 JSON = "682c06a0-de6a-54ab-a142-c8b1cf79cde6"
 LinearAlgebra = "37e2e46d-f89d-539d-b4ee-838fcccc9c8e"
 MathOptInterface = "b8f27783-ece8-5eb3-8dc8-9495eed66fee"
@@ -11,6 +12,7 @@ MathOptVRP = "ee161a15-0030-435c-8c62-bd8c501c3551"
 vroom_jll = "62a4a0cf-2cbc-5e0f-8f30-f6cab19063e7"
 
 [compat]
+JLLWrappers = "1.7"
 JSON = "1.4"
 LinearAlgebra = "1.10"
 MathOptInterface = "1"
