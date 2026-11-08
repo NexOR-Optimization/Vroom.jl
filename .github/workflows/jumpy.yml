@@ -23,7 +23,7 @@ jobs:
       - uses: julia-actions/setup-julia@v2
         with:
           version: "1.13.2"
-      - uses: julia-actions/cache@v2
+      - uses: julia-actions/cache@v3
       - name: Install JuliaC
         run: julia --project=@juliac -e 'using Pkg; Pkg.add(PackageSpec(name="JuliaC", version="0.3.12"))'
       - uses: astral-sh/setup-uv@v7
