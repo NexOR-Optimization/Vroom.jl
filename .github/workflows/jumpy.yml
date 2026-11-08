@@ -13,10 +13,10 @@ jobs:
       matrix:
         os: [ubuntu-latest, macos-latest]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       # The build script and the Python package of JuMPy, outside of `jumpy/`
       # that a case-insensitive file system (macOS) would confuse with `JuMPy/`.
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           repository: NexOR-Optimization/JuMPy
           path: deps/JuMPy
